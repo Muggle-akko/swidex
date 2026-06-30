@@ -1,0 +1,25 @@
+[package]
+name = "swidex"
+version = "0.1.0"
+description = "A small macOS desktop switcher for Codex ChatGPT and proxy modes."
+authors = ["awu"]
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "swidex_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+toml_edit = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
