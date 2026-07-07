@@ -14,6 +14,7 @@ const AUTH_FILE: &str = ".codex/auth.json";
 const HISTORY_FILE: &str = ".codex/history.jsonl";
 const SESSIONS_DIR: &str = ".codex/sessions";
 const BACKUP_ROOT: &str = "CodexBackups";
+const KEYCHAIN_SERVICE: &str = "Swidex Proxy API Keys";
 
 const ENV_KEYS: [&str; 7] = [
     "OPENAI_API_KEY",
@@ -34,6 +35,8 @@ const LAUNCHCTL_KEYS: [&str; 6] = [
     "API_BASE_URL",
 ];
 
+const PROXY_ENV_KEYS: [&str; 3] = ["OPENAI_BASE_URL", "OPENAI_API_KEY", "CODEX_API_KEY"];
+
 const SHELL_FILES: [&str; 5] = [
     ".zshrc",
     ".zprofile",
@@ -42,21 +45,7 @@ const SHELL_FILES: [&str; 5] = [
     ".profile",
 ];
 
-const SUSPICIOUS_TOKENS: [&str; 13] = [
-    "anyrouter",
-    "muyuan.do",
-    "OPENAI_API_KEY",
-    "CODEX_API_KEY",
-    "OPENAI_BASE_URL",
-    "OPENAI_API_BASE",
-    "BASE_URL",
-    "API_BASE_URL",
-    "CODEX_ACCESS_TOKEN",
-    "api-key",
-    "apikey",
-    "base_url",
-    "model_providers.codex",
-];
+const SUSPICIOUS_DOMAINS: [&str; 2] = ["anyrouter", "muyuan.do"];
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +108,13 @@ struct LaunchctlUnsetReport {
     supported: bool,
 }
 
+struct LaunchctlSetReport {
+    commands: Vec<String>,
+    results: Vec<String>,
+    set_count: usize,
+    supported: bool,
+}
+
 #[tauri::command]
 fn doctor() -> Result<DoctorReport, String> {
     Ok(build_doctor_report())
@@ -137,7 +133,11 @@ fn use_chatgpt() -> Result<OperationResult, String> {
     ensure_codex_dir(&home)?;
     if config_path.exists() {
         if let Some(backup) = backup_file(&config_path, &stamp)? {
-            commands.push(format!("cp {} {}", display_path(&config_path), display_path(&backup)));
+            commands.push(format!(
+                "cp {} {}",
+                display_path(&config_path),
+                display_path(&backup)
+            ));
             backups.push(display_path(&backup));
         }
     }
@@ -147,7 +147,8 @@ fn use_chatgpt() -> Result<OperationResult, String> {
     remove_proxy_state(&mut doc);
     write_config(&config_path, &doc)?;
     commands.push(format!("write {}", display_path(&config_path)));
-    actions.push("已将 Codex provider 切回 openai，并移除 codex 中转站 provider 配置。".to_string());
+    actions
+        .push("已将 Codex provider 切回 openai，并移除 codex 中转站 provider 配置。".to_string());
     results.push("config.toml: model_provider=openai，codex provider 已移除。".to_string());
 
     for shell_file in SHELL_FILES {
@@ -156,13 +157,24 @@ fn use_chatgpt() -> Result<OperationResult, String> {
             continue;
         }
         if let Some(backup) = backup_file(&path, &stamp)? {
-            commands.push(format!("cp {} {}", display_path(&path), display_path(&backup)));
+            commands.push(format!(
+                "cp {} {}",
+                display_path(&path),
+                display_path(&backup)
+            ));
             backups.push(display_path(&backup));
         }
         let removed = clean_shell_file(&path)?;
         if removed > 0 {
-            commands.push(format!("edit {} # remove {} matching lines", display_path(&path), removed));
-            actions.push(format!("已从 {} 移除 {} 行可疑环境配置。", shell_file, removed));
+            commands.push(format!(
+                "edit {} # remove {} matching lines",
+                display_path(&path),
+                removed
+            ));
+            actions.push(format!(
+                "已从 {} 移除 {} 行可疑环境配置。",
+                shell_file, removed
+            ));
             results.push(format!("{}: 移除 {} 行。", shell_file, removed));
         } else {
             results.push(format!("{}: 未发现需要移除的行。", shell_file));
@@ -173,15 +185,25 @@ fn use_chatgpt() -> Result<OperationResult, String> {
         let was_set = env::var_os(key).is_some();
         env::remove_var(key);
         commands.push(format!("unset {}", key));
-        results.push(format!("{}: {}", key, if was_set { "unset" } else { "not set" }));
+        results.push(format!(
+            "{}: {}",
+            key,
+            if was_set { "unset" } else { "not set" }
+        ));
     }
-    actions.push("已清理本应用进程内的相关环境变量。当前已打开终端的父进程环境需要重新打开或手动 unset。".to_string());
+    actions.push(
+        "已清理本应用进程内的相关环境变量。当前已打开终端的父进程环境需要重新打开或手动 unset。"
+            .to_string(),
+    );
 
     let launchctl_report = unset_launchctl_envs();
     commands.extend(launchctl_report.commands);
     results.extend(launchctl_report.results);
     if launchctl_report.unset_count > 0 {
-        actions.push(format!("已清理 {} 个 launchctl 环境变量。", launchctl_report.unset_count));
+        actions.push(format!(
+            "已清理 {} 个 launchctl 环境变量。",
+            launchctl_report.unset_count
+        ));
     } else if !launchctl_report.supported {
         actions.push("当前系统不支持 launchctl，已跳过 GUI 环境变量清理。".to_string());
     } else {
@@ -221,7 +243,11 @@ fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationRes
 
     if config_path.exists() {
         if let Some(backup) = backup_file(&config_path, &stamp)? {
-            commands.push(format!("cp {} {}", display_path(&config_path), display_path(&backup)));
+            commands.push(format!(
+                "cp {} {}",
+                display_path(&config_path),
+                display_path(&backup)
+            ));
             backups.push(display_path(&backup));
         }
     }
@@ -236,18 +262,55 @@ fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationRes
     results.push(format!("base_url: {}", normalized_url));
     results.push("env_key: CODEX_API_KEY".to_string());
 
+    set_runtime_proxy_envs(&normalized_url, trimmed_key);
+    commands.push(format!("setenv OPENAI_BASE_URL {}", normalized_url));
+    commands.push("setenv OPENAI_API_KEY ***".to_string());
+    commands.push("setenv CODEX_API_KEY ***".to_string());
+    actions.push(
+        "已在 Swidex 当前进程设置 OPENAI_BASE_URL、OPENAI_API_KEY 和 CODEX_API_KEY。".to_string(),
+    );
+    results.push(format!("OPENAI_BASE_URL: {}", normalized_url));
+    results.push("OPENAI_API_KEY: 已设置（日志已隐藏明文）。".to_string());
+    results.push("CODEX_API_KEY: 已设置（日志已隐藏明文）。".to_string());
+
     if persist_key {
         let zshrc = home.join(".zshrc");
         if zshrc.exists() {
             if let Some(backup) = backup_file(&zshrc, &stamp)? {
-                commands.push(format!("cp {} {}", display_path(&zshrc), display_path(&backup)));
+                commands.push(format!(
+                    "cp {} {}",
+                    display_path(&zshrc),
+                    display_path(&backup)
+                ));
                 backups.push(display_path(&backup));
             }
         }
-        persist_codex_key(&zshrc, trimmed_key)?;
-        commands.push(format!("write {} # export CODEX_API_KEY=***", display_path(&zshrc)));
-        actions.push("已按你的选择把 CODEX_API_KEY 持久化到 ~/.zshrc。".to_string());
+        persist_proxy_env(&zshrc, &normalized_url, trimmed_key)?;
+        commands.push(format!(
+            "write {} # export OPENAI_BASE_URL / OPENAI_API_KEY / CODEX_API_KEY",
+            display_path(&zshrc)
+        ));
+        actions.push(
+            "已按你的选择把 OPENAI_BASE_URL、OPENAI_API_KEY 和 CODEX_API_KEY 持久化到 ~/.zshrc。"
+                .to_string(),
+        );
+        results.push("OPENAI_BASE_URL: 已持久化到 ~/.zshrc。".to_string());
+        results.push("OPENAI_API_KEY: 已持久化到 ~/.zshrc（日志已隐藏明文）。".to_string());
         results.push("CODEX_API_KEY: 已持久化到 ~/.zshrc（日志已隐藏明文）。".to_string());
+
+        let launchctl_report = set_launchctl_proxy_envs(&normalized_url, trimmed_key);
+        commands.extend(launchctl_report.commands);
+        results.extend(launchctl_report.results);
+        if launchctl_report.set_count > 0 {
+            actions.push(format!(
+                "已同步 {} 个 launchctl 环境变量，重新打开 GUI 应用后会继承。",
+                launchctl_report.set_count
+            ));
+        } else if !launchctl_report.supported {
+            actions.push("当前系统不支持 launchctl，已跳过 GUI 环境变量同步。".to_string());
+        } else {
+            actions.push("launchctl 环境变量同步未成功，请查看结果日志。".to_string());
+        }
     } else {
         actions.push("未持久化 API key。可用下方临时命令从终端启动 Codex。".to_string());
         results.push("CODEX_API_KEY: 未持久化。".to_string());
@@ -259,9 +322,14 @@ fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationRes
         ok: true,
         title: "已切换到 API / 中转站模式".to_string(),
         message: if persist_key {
-            "关闭并重新打开终端或相关应用后，持久化的 CODEX_API_KEY 才会被新进程继承。".to_string()
+            "关闭并重新打开终端或相关应用后，持久化的 API 环境变量才会被新进程继承。".to_string()
         } else {
-            format!("临时启动命令：CODEX_API_KEY=\"{}\" codex", mask_key(trimmed_key))
+            format!(
+                "临时启动命令：OPENAI_BASE_URL=\"{}\" OPENAI_API_KEY=\"{}\" CODEX_API_KEY=\"{}\" codex",
+                normalized_url,
+                mask_key(trimmed_key),
+                mask_key(trimmed_key)
+            )
         },
         backups,
         actions,
@@ -269,6 +337,25 @@ fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationRes
         results,
         report,
     })
+}
+
+#[tauri::command]
+fn save_provider_secret(profile_id: String, key: String) -> Result<(), String> {
+    let trimmed_key = key.trim();
+    if trimmed_key.is_empty() {
+        return delete_provider_secret(profile_id);
+    }
+    write_keychain_secret(&profile_id, trimmed_key)
+}
+
+#[tauri::command]
+fn get_provider_secret(profile_id: String) -> Result<Option<String>, String> {
+    read_keychain_secret(&profile_id)
+}
+
+#[tauri::command]
+fn delete_provider_secret(profile_id: String) -> Result<(), String> {
+    delete_keychain_secret(&profile_id)
 }
 
 #[tauri::command]
@@ -342,7 +429,11 @@ fn reset_auth() -> Result<OperationResult, String> {
 
     if auth.exists() {
         if let Some(backup) = backup_file(&auth, &stamp)? {
-            commands.push(format!("cp {} {}", display_path(&auth), display_path(&backup)));
+            commands.push(format!(
+                "cp {} {}",
+                display_path(&auth),
+                display_path(&backup)
+            ));
             backups.push(display_path(&backup));
         }
         fs::remove_file(&auth).map_err(to_string_err)?;
@@ -375,6 +466,9 @@ pub fn run() {
             doctor,
             use_chatgpt,
             use_proxy,
+            save_provider_secret,
+            get_provider_secret,
+            delete_provider_secret,
             backup_history,
             reset_auth
         ])
@@ -599,9 +693,10 @@ fn is_shell_residue_line(line: &str) -> bool {
         || trimmed.starts_with("unset ")
         || trimmed.contains("=");
     looks_like_assignment
-        && SUSPICIOUS_TOKENS
-            .iter()
-            .any(|token| lower.contains(&token.to_lowercase()))
+        && (line_sets_any_env_key(trimmed, &ENV_KEYS)
+            || SUSPICIOUS_DOMAINS
+                .iter()
+                .any(|domain| lower.contains(domain)))
 }
 
 fn unset_launchctl_envs() -> LaunchctlUnsetReport {
@@ -623,8 +718,8 @@ fn unset_launchctl_envs() -> LaunchctlUnsetReport {
         commands.push(format!("launchctl getenv {}", key));
         match Command::new("launchctl").args(["getenv", key]).output() {
             Ok(output) => {
-                let is_set =
-                    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty();
+                let is_set = output.status.success()
+                    && !String::from_utf8_lossy(&output.stdout).trim().is_empty();
                 if is_set {
                     commands.push(format!("launchctl unsetenv {}", key));
                     match Command::new("launchctl").args(["unsetenv", key]).status() {
@@ -632,8 +727,12 @@ fn unset_launchctl_envs() -> LaunchctlUnsetReport {
                             count += 1;
                             results.push(format!("launchctl {}: unset", key));
                         }
-                        Ok(status) => results.push(format!("launchctl {}: unset failed ({})", key, status)),
-                        Err(err) => results.push(format!("launchctl {}: unset failed ({})", key, err)),
+                        Ok(status) => {
+                            results.push(format!("launchctl {}: unset failed ({})", key, status))
+                        }
+                        Err(err) => {
+                            results.push(format!("launchctl {}: unset failed ({})", key, err))
+                        }
                     }
                 } else {
                     results.push(format!("launchctl {}: not set", key));
@@ -646,6 +745,49 @@ fn unset_launchctl_envs() -> LaunchctlUnsetReport {
         commands,
         results,
         unset_count: count,
+        supported: true,
+    }
+}
+
+fn set_launchctl_proxy_envs(base_url: &str, key: &str) -> LaunchctlSetReport {
+    let mut commands = Vec::new();
+    let mut results = Vec::new();
+    if !cfg!(target_os = "macos") {
+        return LaunchctlSetReport {
+            commands,
+            results: PROXY_ENV_KEYS
+                .iter()
+                .map(|env_key| format!("launchctl {}: skipped (not macOS)", env_key))
+                .collect(),
+            set_count: 0,
+            supported: false,
+        };
+    }
+
+    let mut count = 0usize;
+    for (env_key, value) in proxy_env_pairs(base_url, key) {
+        commands.push(format!(
+            "launchctl setenv {} {}",
+            env_key,
+            redacted_env_value(env_key, value)
+        ));
+        match Command::new("launchctl")
+            .args(["setenv", env_key, value])
+            .status()
+        {
+            Ok(status) if status.success() => {
+                count += 1;
+                results.push(format!("launchctl {}: set", env_key));
+            }
+            Ok(status) => results.push(format!("launchctl {}: set failed ({})", env_key, status)),
+            Err(err) => results.push(format!("launchctl {}: set failed ({})", env_key, err)),
+        }
+    }
+
+    LaunchctlSetReport {
+        commands,
+        results,
+        set_count: count,
         supported: true,
     }
 }
@@ -665,22 +807,209 @@ fn normalize_proxy_url(raw: &str) -> Result<String, String> {
     }
 }
 
-fn persist_codex_key(path: &Path, key: &str) -> Result<(), String> {
+fn set_runtime_proxy_envs(base_url: &str, key: &str) {
+    for (env_key, value) in proxy_env_pairs(base_url, key) {
+        env::set_var(env_key, value);
+    }
+}
+
+fn write_keychain_secret(profile_id: &str, key: &str) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("API Key 加密保存目前仅支持 macOS Keychain。".to_string());
+    }
+    let account = keychain_account(profile_id)?;
+    let status = Command::new("/usr/bin/security")
+        .args([
+            "add-generic-password",
+            "-a",
+            account.as_str(),
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+            key,
+            "-U",
+        ])
+        .status()
+        .map_err(|err| format!("无法写入 macOS Keychain：{}", err))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("macOS Keychain 写入失败：{}", status))
+    }
+}
+
+fn read_keychain_secret(profile_id: &str) -> Result<Option<String>, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("API Key 加密读取目前仅支持 macOS Keychain。".to_string());
+    }
+    let account = keychain_account(profile_id)?;
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-a",
+            account.as_str(),
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+        ])
+        .output()
+        .map_err(|err| format!("无法读取 macOS Keychain：{}", err))?;
+    if output.status.success() {
+        let secret = String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        Ok(Some(secret))
+    } else if keychain_item_not_found(&output) {
+        Ok(None)
+    } else {
+        Err(format_security_error("读取", &output))
+    }
+}
+
+fn delete_keychain_secret(profile_id: &str) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("API Key 加密删除目前仅支持 macOS Keychain。".to_string());
+    }
+    let account = keychain_account(profile_id)?;
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "delete-generic-password",
+            "-a",
+            account.as_str(),
+            "-s",
+            KEYCHAIN_SERVICE,
+        ])
+        .output()
+        .map_err(|err| format!("无法删除 macOS Keychain 项：{}", err))?;
+    if output.status.success() || keychain_item_not_found(&output) {
+        Ok(())
+    } else {
+        Err(format_security_error("删除", &output))
+    }
+}
+
+fn keychain_account(profile_id: &str) -> Result<String, String> {
+    let trimmed = profile_id.trim();
+    if trimmed.is_empty() {
+        return Err("中转站 ID 不能为空。".to_string());
+    }
+    Ok(format!("swidex-provider-{}", trimmed))
+}
+
+fn keychain_item_not_found(output: &std::process::Output) -> bool {
+    output.status.code() == Some(44)
+        || String::from_utf8_lossy(&output.stderr)
+            .to_lowercase()
+            .contains("could not be found")
+}
+
+fn format_security_error(action: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if !stderr.trim().is_empty() {
+        stderr.trim()
+    } else if !stdout.trim().is_empty() {
+        stdout.trim()
+    } else {
+        "无详细信息"
+    };
+    format!("macOS Keychain {}失败：{}", action, detail)
+}
+
+fn persist_proxy_env(path: &Path, base_url: &str, key: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(to_string_err)?;
     }
     let existing = fs::read_to_string(path).unwrap_or_default();
     let cleaned = existing
         .lines()
-        .filter(|line| !is_shell_residue_line(line) || !line.contains("CODEX_API_KEY"))
+        .filter(|line| !is_proxy_env_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let proxy_exports = proxy_env_pairs(base_url, key)
+        .iter()
+        .map(|(env_key, value)| format!("export {}={}", env_key, shell_double_quote(value)))
         .collect::<Vec<_>>()
         .join("\n");
     let next = if cleaned.trim().is_empty() {
-        format!("export CODEX_API_KEY=\"{}\"\n", key)
+        format!("{}\n", proxy_exports)
     } else {
-        format!("{}\nexport CODEX_API_KEY=\"{}\"\n", cleaned, key)
+        format!("{}\n{}\n", cleaned, proxy_exports)
     };
     fs::write(path, next).map_err(to_string_err)
+}
+
+fn proxy_env_pairs<'a>(base_url: &'a str, key: &'a str) -> [(&'static str, &'a str); 3] {
+    [
+        ("OPENAI_BASE_URL", base_url),
+        ("OPENAI_API_KEY", key),
+        ("CODEX_API_KEY", key),
+    ]
+}
+
+fn is_proxy_env_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return false;
+    }
+    line_sets_any_env_key(trimmed, &PROXY_ENV_KEYS)
+}
+
+fn line_sets_any_env_key(line: &str, keys: &[&str]) -> bool {
+    shell_env_keys(line)
+        .iter()
+        .any(|candidate| keys.iter().any(|key| candidate.eq_ignore_ascii_case(key)))
+}
+
+fn shell_env_keys(line: &str) -> Vec<String> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return Vec::new();
+    }
+
+    let payload = trimmed
+        .strip_prefix("export ")
+        .or_else(|| trimmed.strip_prefix("setenv "))
+        .or_else(|| trimmed.strip_prefix("unset "))
+        .unwrap_or(trimmed);
+
+    payload
+        .split_whitespace()
+        .filter_map(|part| {
+            let key = part
+                .split_once('=')
+                .map(|(left, _)| left)
+                .unwrap_or(part)
+                .trim_matches(|ch: char| ch == ';' || ch == '"' || ch == '\'')
+                .trim();
+            if key.is_empty() || !key.chars().all(is_shell_key_char) {
+                None
+            } else {
+                Some(key.to_string())
+            }
+        })
+        .collect()
+}
+
+fn is_shell_key_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn shell_double_quote(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`");
+    format!("\"{}\"", escaped)
+}
+
+fn redacted_env_value(env_key: &str, value: &str) -> String {
+    if env_key.contains("KEY") {
+        "***".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
@@ -755,7 +1084,9 @@ fn launchctl_getenv_is_set(key: &str) -> bool {
     Command::new("launchctl")
         .args(["getenv", key])
         .output()
-        .map(|output| output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty())
+        .map(|output| {
+            output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+        })
         .unwrap_or(false)
 }
 
@@ -887,8 +1218,70 @@ env_key = "CODEX_API_KEY"
     fn shell_cleaning_keeps_comments_and_unrelated_lines() {
         assert!(!is_shell_residue_line("# export CODEX_API_KEY=\"sk-test\""));
         assert!(!is_shell_residue_line("export PATH=\"$HOME/bin:$PATH\""));
+        assert!(!is_shell_residue_line(
+            "export DATABASE_URL=\"postgres://localhost/app\""
+        ));
+        assert!(!is_shell_residue_line(
+            "export MY_OPENAI_BASE_URL=\"https://example.com\""
+        ));
         assert!(is_shell_residue_line("export CODEX_API_KEY=\"sk-test\""));
-        assert!(is_shell_residue_line("OPENAI_BASE_URL=https://example.com/v1"));
+        assert!(is_shell_residue_line("setenv OPENAI_API_KEY sk-test"));
+        assert!(is_shell_residue_line("unset OPENAI_BASE_URL CODEX_API_KEY"));
+        assert!(is_shell_residue_line(
+            "export BASE_URL=\"https://example.com\""
+        ));
+        assert!(is_shell_residue_line(
+            "OPENAI_BASE_URL=https://example.com/v1"
+        ));
+        assert!(is_shell_residue_line("PROXY_URL=https://anyrouter.top"));
+    }
+
+    #[test]
+    fn proxy_env_detection_uses_exact_env_names() {
+        assert!(is_proxy_env_line("export OPENAI_API_KEY=\"sk-test\""));
+        assert!(is_proxy_env_line("CODEX_API_KEY=sk-test"));
+        assert!(is_proxy_env_line("unset OPENAI_BASE_URL CODEX_API_KEY"));
+        assert!(!is_proxy_env_line("export MY_OPENAI_API_KEY=\"sk-test\""));
+        assert!(!is_proxy_env_line(
+            "export BASE_URL=\"https://example.com\""
+        ));
+    }
+
+    #[test]
+    fn persisting_proxy_env_writes_all_required_keys() {
+        let dir = tempdir().unwrap();
+        let zshrc = dir.path().join(".zshrc");
+        fs::write(
+            &zshrc,
+            r#"export PATH="$HOME/bin:$PATH"
+export OPENAI_BASE_URL="https://old.example/v1"
+export OPENAI_API_KEY="old-openai"
+export CODEX_API_KEY="old-codex"
+# export CODEX_API_KEY="commented"
+"#,
+        )
+        .unwrap();
+
+        persist_proxy_env(&zshrc, "https://anyrouter.top/v1", "sk-test").unwrap();
+
+        let text = fs::read_to_string(&zshrc).unwrap();
+        assert!(text.contains(r#"export PATH="$HOME/bin:$PATH""#));
+        assert!(text.contains(r#"# export CODEX_API_KEY="commented""#));
+        assert!(text.contains(r#"export OPENAI_BASE_URL="https://anyrouter.top/v1""#));
+        assert!(text.contains(r#"export OPENAI_API_KEY="sk-test""#));
+        assert!(text.contains(r#"export CODEX_API_KEY="sk-test""#));
+        assert!(!text.contains("old-openai"));
+        assert!(!text.contains("old-codex"));
+        assert!(!text.contains("old.example"));
+    }
+
+    #[test]
+    fn keychain_account_uses_profile_id_namespace() {
+        assert_eq!(
+            keychain_account("profile-123").unwrap(),
+            "swidex-provider-profile-123"
+        );
+        assert!(keychain_account("   ").is_err());
     }
 
     #[test]

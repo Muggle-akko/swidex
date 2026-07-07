@@ -388,6 +388,64 @@ input:focus {
   font-size: 14px;
 }
 
+.checkline > span:first-of-type {
+  flex: 1;
+}
+
+.help-tip {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.help-tip button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: help;
+}
+
+.help-tip button:hover,
+.help-tip button:focus-visible {
+  background: #292930;
+  color: var(--text);
+  outline: none;
+}
+
+.help-tip svg {
+  width: 16px;
+  height: 16px;
+}
+
+.help-tip > span {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 5;
+  display: none;
+  width: 300px;
+  max-width: 52vw;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #111116;
+  color: #d8d8df;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.34);
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.55;
+}
+
+.help-tip:hover > span,
+.help-tip:focus-within > span {
+  display: block;
+}
+
 .bottom-bar {
   position: fixed;
   right: 0;

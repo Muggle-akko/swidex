@@ -1,5 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
-import { AlertTriangle, ArrowLeft, CheckCircle2, Copy, Eye, EyeOff, Loader2, Plus, Save, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  CircleHelp,
+  Copy,
+  Eye,
+  EyeOff,
+  Loader2,
+  Plus,
+  Save,
+  X
+} from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type EnvStatus = { key: string; set: boolean };
@@ -39,6 +51,9 @@ type ProviderProfile = {
   name: string;
   note: string;
   url: string;
+  hasKey?: boolean;
+  key?: string;
+  persistKey?: boolean;
 };
 
 type EditableProvider = ProviderProfile & {
@@ -47,7 +62,7 @@ type EditableProvider = ProviderProfile & {
 };
 
 type Screen = "list" | "edit";
-type TaskName = "doctor" | "chatgpt" | "proxy" | "history" | "auth" | null;
+type TaskName = "doctor" | "chatgpt" | "proxy" | "profile" | "history" | "auth" | null;
 
 type OperationLogEntry = {
   id: string;
@@ -101,7 +116,36 @@ function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+    if (isTauriRuntime() && profiles.some((profile) => profile.key?.trim())) return;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles.map(profileForStorage)));
+  }, [profiles]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const profilesWithPlaintextKeys = profiles.filter((profile) => profile.key?.trim());
+    if (profilesWithPlaintextKeys.length === 0) return;
+
+    let cancelled = false;
+    async function migrate() {
+      for (const profile of profilesWithPlaintextKeys) {
+        if (!profile.key?.trim()) continue;
+        await saveProviderSecret(profile.id, profile.key);
+      }
+      if (!cancelled) {
+        setProfiles((current) =>
+          current.map((profile) =>
+            profile.key?.trim()
+              ? { ...profile, hasKey: true, key: undefined }
+              : profile
+          )
+        );
+      }
+    }
+
+    migrate().catch((err) => setError(String(err)));
+    return () => {
+      cancelled = true;
+    };
   }, [profiles]);
 
   const isProxyMode = report?.modelProvider === "codex";
@@ -118,12 +162,12 @@ function App() {
   }, [report]);
 
   const providers = useMemo(() => {
-    const normalizedBase = report?.baseUrl ? normalizeUrl(report.baseUrl) : "";
+    const normalizedBase = report?.baseUrl ? normalizeProxyIdentity(report.baseUrl) : "";
     const hasCurrentProxy = normalizedBase
-      ? profiles.some((profile) => normalizeUrl(profile.url) === normalizedBase)
+      ? profiles.some((profile) => sameProxyEndpoint(profile.url, report?.baseUrl ?? ""))
       : true;
     const currentProxy =
-      normalizedBase && !hasCurrentProxy
+      isProxyMode && normalizedBase && !hasCurrentProxy
         ? [{ id: "current-proxy", name: "当前中转站", note: "来自 config.toml", url: report?.baseUrl ?? "" }]
         : [];
     return [
@@ -131,7 +175,7 @@ function App() {
       ...currentProxy,
       ...profiles
     ];
-  }, [profiles, report?.baseUrl]);
+  }, [profiles, report?.baseUrl, isProxyMode]);
 
   async function refreshDoctor() {
     setTask("doctor");
@@ -150,7 +194,7 @@ function App() {
     }
   }
 
-  async function runOperation(name: Exclude<TaskName, "doctor" | "proxy" | null>, command: string) {
+  async function runOperation(name: Exclude<TaskName, "doctor" | "proxy" | "profile" | null>, command: string) {
     setTask(name);
     setError(null);
     try {
@@ -178,6 +222,9 @@ function App() {
       if (!isTauriRuntime()) {
         throw new Error("当前是网页预览模式，请在 Swidex App 中执行真实操作。");
       }
+      if (profile.id !== "current-proxy" && profile.id !== "official") {
+        await saveProviderSecret(profile.id, key);
+      }
       const next = await invoke<OperationResult>("use_proxy", {
         url: profile.url,
         key,
@@ -186,8 +233,18 @@ function App() {
       setResult(next);
       setReport(next.report);
       recordOperation(next);
+      if (profile.id !== "current-proxy" && profile.id !== "official") {
+        setProfiles((current) =>
+          current.map((item) =>
+            item.id === profile.id
+              ? { ...item, hasKey: Boolean(key.trim()), key: undefined, persistKey }
+              : item
+          )
+        );
+      }
       setProxyPrompt(null);
       setProxyKey("");
+      setShowProxyKey(false);
       setProxyPersistKey(false);
     } catch (err) {
       setError(String(err));
@@ -198,31 +255,52 @@ function App() {
 
   async function submitProvider(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    saveProfile(draft);
-    setScreen("list");
-    setResult(null);
-    setError(null);
+    await saveProfile(draft);
   }
 
-  function saveProfile(nextDraft: EditableProvider) {
+  async function saveProfile(nextDraft: EditableProvider) {
     const id = nextDraft.id || crypto.randomUUID();
-    const nextProfile: ProviderProfile = {
-      id,
-      name: nextDraft.name.trim() || hostLabel(nextDraft.url) || "未命名中转站",
-      note: nextDraft.note.trim(),
-      url: nextDraft.url.trim()
-    };
-    setProfiles((current) => [...current.filter((item) => item.id !== id), nextProfile]);
+    const trimmedKey = nextDraft.key.trim();
+    setTask("profile");
+    setError(null);
+    try {
+      if (isTauriRuntime()) {
+        if (trimmedKey) {
+          await saveProviderSecret(id, trimmedKey);
+        } else {
+          await deleteProviderSecret(id);
+        }
+      }
+
+      const nextProfile: ProviderProfile = {
+        id,
+        name: nextDraft.name.trim() || hostLabel(nextDraft.url) || "未命名中转站",
+        note: nextDraft.note.trim(),
+        url: nextDraft.url.trim(),
+        hasKey: Boolean(trimmedKey),
+        key: isTauriRuntime() ? undefined : trimmedKey,
+        persistKey: nextDraft.persistKey
+      };
+      setProfiles((current) => [...current.filter((item) => item.id !== id), nextProfile]);
+      setScreen("list");
+      setResult(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setTask(null);
+    }
   }
 
-  function openEditor(provider?: Partial<ProviderProfile>) {
+  async function openEditor(provider?: Partial<ProviderProfile>) {
+    const profileId = provider?.id === "current-proxy" ? "" : provider?.id ?? "";
+    const key = profileId ? await loadProviderSecret({ ...provider, id: profileId }) : provider?.key ?? "";
     setDraft({
-      id: provider?.id === "current-proxy" ? "" : provider?.id ?? "",
+      id: profileId,
       name: provider?.name ?? "",
       note: provider?.note ?? "",
       url: provider?.url ?? "",
-      key: "",
-      persistKey: false
+      key,
+      persistKey: provider?.persistKey ?? false
     });
     setShowDraftKey(false);
     setResult(null);
@@ -230,14 +308,34 @@ function App() {
     setScreen("edit");
   }
 
-  function removeProfile(id: string) {
+  async function removeProfile(id: string) {
+    if (isTauriRuntime()) {
+      await deleteProviderSecret(id).catch((err) => setError(String(err)));
+    }
     setProfiles((current) => current.filter((profile) => profile.id !== id));
   }
 
-  function askEnableProxy(provider: ProviderProfile) {
+  async function askEnableProxy(provider: ProviderProfile) {
+    const key = await loadProviderSecret(provider);
+    if (provider.hasKey && !key.trim()) return;
     setProxyPrompt(provider);
-    setProxyKey("");
-    setProxyPersistKey(false);
+    setProxyKey(key);
+    setProxyPersistKey(provider.persistKey ?? false);
+    setShowProxyKey(false);
+  }
+
+  async function loadProviderSecret(provider: Partial<ProviderProfile>) {
+    if (provider.key?.trim()) return provider.key;
+    if (!isTauriRuntime() || !provider.id || !provider.hasKey) return "";
+    try {
+      const secret = await getProviderSecret(provider.id);
+      if (secret) return secret;
+      setError("未在 macOS 钥匙串找到这个中转站的 Key，请编辑后重新保存。");
+      return "";
+    } catch (err) {
+      setError(String(err));
+      return "";
+    }
   }
 
   function recordOperation(next: OperationResult) {
@@ -266,7 +364,7 @@ function App() {
           </button>
           <div>
             <h1>中转站配置</h1>
-            <p>只保存名称、备注、Base URL。Key 默认只用于本次启用。</p>
+            <p>Key 会加密保存到 macOS 钥匙串，启用时自动带入。</p>
           </div>
         </header>
 
@@ -306,7 +404,7 @@ function App() {
             <SecretInput
               value={draft.key}
               visible={showDraftKey}
-              placeholder="留空表示只保存配置，不立即启用"
+              placeholder="留空表示不保存或删除已保存 Key"
               onChange={(value) => setDraft({ ...draft, key: value })}
               onToggleVisible={() => setShowDraftKey((current) => !current)}
             />
@@ -318,7 +416,8 @@ function App() {
               checked={draft.persistKey}
               onChange={(event) => setDraft({ ...draft, persistKey: event.target.checked })}
             />
-            <span>把 CODEX_API_KEY 写入 ~/.zshrc</span>
+            <span>持久化到 shell/launchctl</span>
+            <HelpTip text="把 API 地址和 Key 写进 ~/.zshrc，并同步给 launchctl。这样新打开的终端或从 Dock 启动的 Codex 也能读到；软件内保存的 Key 另存在 macOS 钥匙串里。" />
           </label>
         </form>
 
@@ -363,8 +462,8 @@ function App() {
         {providers.map((provider) => {
           const active =
             provider.id === "official"
-              ? !isProxyMode
-              : isProxyMode && normalizeUrl(provider.url) === normalizeUrl(report?.baseUrl ?? provider.url);
+              ? Boolean(report) && !isProxyMode
+              : isProxyMode && Boolean(report?.baseUrl) && sameProxyEndpoint(provider.url, report?.baseUrl ?? "");
           return (
             <article className={`provider-row ${active ? "active" : ""}`} key={provider.id}>
               <span className="provider-mark">{provider.id === "official" ? "O" : firstGlyph(provider.name)}</span>
@@ -372,6 +471,7 @@ function App() {
                 <div className="name-line">
                   <h2>{provider.name}</h2>
                   {active && <span>当前使用</span>}
+                  {provider.id !== "official" && provider.hasKey && <b>Key 已加密保存</b>}
                   {provider.note && <b>{provider.note}</b>}
                 </div>
                 <p>{provider.url}</p>
@@ -557,6 +657,17 @@ function LogBlock({ title, items }: { title: string; items: string[] }) {
   );
 }
 
+function HelpTip({ text }: { text: string }) {
+  return (
+    <span className="help-tip">
+      <button type="button" aria-label="说明">
+        <CircleHelp />
+      </button>
+      <span role="tooltip">{text}</span>
+    </span>
+  );
+}
+
 function SecretInput({
   value,
   visible,
@@ -674,7 +785,8 @@ function ProxyConfirmDialog({
             checked={persistKey}
             onChange={(event) => onPersistKeyChange(event.target.checked)}
           />
-          <span>把 CODEX_API_KEY 写入 ~/.zshrc</span>
+          <span>持久化到 shell/launchctl</span>
+          <HelpTip text="把 API 地址和 Key 写进 ~/.zshrc，并同步给 launchctl。这样新打开的终端或从 Dock 启动的 Codex 也能读到；软件内保存的 Key 另存在 macOS 钥匙串里。" />
         </label>
         <div>
           <button className="plain-button" onClick={onCancel}>取消</button>
@@ -688,6 +800,29 @@ function ProxyConfirmDialog({
   );
 }
 
+async function saveProviderSecret(profileId: string, key: string) {
+  await invoke("save_provider_secret", { profileId, key });
+}
+
+async function getProviderSecret(profileId: string) {
+  return await invoke<string | null>("get_provider_secret", { profileId });
+}
+
+async function deleteProviderSecret(profileId: string) {
+  await invoke("delete_provider_secret", { profileId });
+}
+
+function profileForStorage(profile: ProviderProfile) {
+  return {
+    id: profile.id,
+    name: profile.name,
+    note: profile.note,
+    url: profile.url,
+    hasKey: Boolean(profile.hasKey || profile.key?.trim()),
+    persistKey: Boolean(profile.persistKey)
+  };
+}
+
 function readProfiles(): ProviderProfile[] {
   for (const key of [STORAGE_KEY, LEGACY_STORAGE_KEY]) {
     try {
@@ -696,10 +831,13 @@ function readProfiles(): ProviderProfile[] {
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) continue;
       return parsed.map((item) => ({
+        key: typeof item.key === "string" ? item.key : "",
         id: item.id || crypto.randomUUID(),
         name: item.name || "未命名中转站",
         note: item.note || "",
-        url: item.url || ""
+        url: item.url || "",
+        hasKey: Boolean(item.hasKey || item.key),
+        persistKey: Boolean(item.persistKey)
       }));
     } catch {
       continue;
@@ -731,12 +869,30 @@ function mockReport(): DoctorReport {
   };
 }
 
-function normalizeUrl(url: string) {
-  return url.trim().replace(/\/+$/, "").replace(/^https?:\/\//, "").toLowerCase();
+function sameProxyEndpoint(left: string, right: string) {
+  return normalizeProxyIdentity(left) === normalizeProxyIdentity(right);
+}
+
+function normalizeProxyIdentity(url: string) {
+  const trimmed = url.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    return `${parsed.hostname.toLowerCase()}${parsed.port ? `:${parsed.port}` : ""}${normalizeProxyPath(parsed.pathname)}`;
+  } catch {
+    return normalizeProxyPath(trimmed.replace(/^https?:\/\//i, "").replace(/[?#].*$/, "").toLowerCase());
+  }
+}
+
+function normalizeProxyPath(value: string) {
+  const withoutTrailingSlash = value.replace(/\/+$/, "");
+  const withoutVersionSuffix = withoutTrailingSlash.replace(/\/v1$/i, "");
+  return withoutVersionSuffix;
 }
 
 function statusLabel(report: DoctorReport | null, riskCount: number) {
   if (!report) return "状态读取中";
+  if (report.modelProvider === "codex") return "中转站模式";
   if (riskCount > 0) return "可能走中转站";
   return "官方模式";
 }

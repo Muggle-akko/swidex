@@ -9,8 +9,8 @@ Swidex 是一个 macOS 桌面小工具，用来在 Codex 的 ChatGPT 官方账�
 - **状态诊断**：检查 `codex login status`、`model_provider`、`base_url`、`env_key`、进程环境变量、shell 启动文件和 `launchctl`。
 - **启用官方模式**：备份并清理中转站 provider、相关 API/Base URL 环境变量、shell 残留和 `launchctl` 残留。
 - **启用中转站模式**：写入 `model_provider = "codex"` 和 `[model_providers.codex]`，并使用 `env_key = "CODEX_API_KEY"`。
-- **中转站配置管理**：保存名称、备注和 Base URL；保存配置不会自动启用，启用需要二次确认。
-- **Key 安全**：API Key 默认只用于本次启用，不写入 shell 文件；界面支持显示/隐藏和复制，但日志不会打印明文 key。
+- **中转站配置管理**：保存名称、备注、Base URL、API Key 和持久化偏好；保存配置不会自动启用，启用需要二次确认。
+- **Key 安全**：API Key 加密保存到 macOS Keychain；localStorage 只保存中转站元数据和是否已有 Key 的标记，日志不会打印明文 key。
 - **历史备份**：备份 `~/.codex/sessions/` 和 `~/.codex/history.jsonl` 到 `~/CodexBackups/`，不包含 `auth.json`。
 - **重置登录缓存**：二次确认后备份并删除 `~/.codex/auth.json`，用于需要重新登录的场景。
 - **操作日志**：记录每次操作的动作、文件操作/命令、备份位置和执行结果摘要。
@@ -55,7 +55,7 @@ supports_websockets = false
 env_key = "CODEX_API_KEY"
 ```
 
-API Key 默认不会长期写入 `~/.zshrc`。只有在你明确勾选持久化时，Swidex 才会写入 `CODEX_API_KEY`。
+填入软件里的 API Key 会加密保存到 macOS Keychain。只有在你明确勾选持久化时，Swidex 才会把 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `CODEX_API_KEY` 额外写入 `~/.zshrc`，并同步到 macOS `launchctl` 供后续 GUI 进程继承。
 
 ## 和 CC Switch 的关系
 
