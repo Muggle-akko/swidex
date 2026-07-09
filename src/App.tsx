@@ -7,6 +7,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  History,
   Loader2,
   Plus,
   Save,
@@ -33,6 +34,20 @@ type DoctorReport = {
   launchctl: LaunchctlStatus[];
   conclusion: string;
   warnings: string[];
+  historyUnify: HistoryUnifyStatus;
+};
+
+type HistoryUnifyStatus = {
+  enabled: boolean;
+  configUnified: boolean;
+  sessionFiles: number;
+  archivedFiles: number;
+  openaiThreads?: number | null;
+  codexThreads?: number | null;
+  otherThreads?: number | null;
+  sqliteStatus: string;
+  migrationBackups: number;
+  restoreBackups: number;
 };
 
 type OperationResult = {
@@ -62,7 +77,7 @@ type EditableProvider = ProviderProfile & {
 };
 
 type Screen = "list" | "edit";
-type TaskName = "doctor" | "chatgpt" | "proxy" | "profile" | "history" | "auth" | null;
+type TaskName = "doctor" | "chatgpt" | "proxy" | "profile" | "history" | "auth" | "historyUnify" | null;
 
 type OperationLogEntry = {
   id: string;
@@ -78,6 +93,7 @@ type OperationLogEntry = {
 
 const STORAGE_KEY = "swidex.providers.v1";
 const LEGACY_STORAGE_KEY = "codex-switch.providers.v1";
+const APP_VERSION = "0.1.2";
 const OFFICIAL_URL = "https://chatgpt.com/codex";
 const unsetSnippet =
   "unset OPENAI_API_KEY CODEX_API_KEY OPENAI_BASE_URL OPENAI_API_BASE BASE_URL API_BASE_URL CODEX_ACCESS_TOKEN";
@@ -104,6 +120,9 @@ function App() {
   const [confirmChatgpt, setConfirmChatgpt] = useState(false);
   const [confirmBackup, setConfirmBackup] = useState(false);
   const [confirmAuth, setConfirmAuth] = useState(false);
+  const [historyPrompt, setHistoryPrompt] = useState<"enable" | "disable" | null>(null);
+  const [migrateExistingHistory, setMigrateExistingHistory] = useState(false);
+  const [restoreMigratedHistory, setRestoreMigratedHistory] = useState(true);
   const [proxyPrompt, setProxyPrompt] = useState<ProviderProfile | null>(null);
   const [proxyKey, setProxyKey] = useState("");
   const [proxyPersistKey, setProxyPersistKey] = useState(false);
@@ -148,11 +167,11 @@ function App() {
     };
   }, [profiles]);
 
-  const isProxyMode = report?.modelProvider === "codex";
+  const isProxyMode = report?.modelProvider === "codex" && !report?.historyUnify.configUnified;
   const riskCount = useMemo(() => {
     if (!report) return 0;
     return [
-      report.modelProvider === "codex",
+      report.modelProvider === "codex" && !report.historyUnify.configUnified,
       Boolean(report.baseUrl),
       Boolean(report.envKey),
       report.env.some((item) => item.set),
@@ -212,6 +231,34 @@ function App() {
       setConfirmChatgpt(false);
       setConfirmBackup(false);
       setConfirmAuth(false);
+      setHistoryPrompt(null);
+    }
+  }
+
+  async function applyHistoryUnify() {
+    if (!historyPrompt) return;
+    const enabled = historyPrompt === "enable";
+    setTask("historyUnify");
+    setError(null);
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("当前是网页预览模式，请在 Swidex App 中执行真实操作。");
+      }
+      const next = await invoke<OperationResult>("set_history_unify", {
+        enabled,
+        migrateExisting: enabled ? migrateExistingHistory : false,
+        restoreMigrated: enabled ? false : restoreMigratedHistory
+      });
+      setResult(next);
+      setReport(next.report);
+      recordOperation(next);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setTask(null);
+      setHistoryPrompt(null);
+      setMigrateExistingHistory(false);
+      setRestoreMigratedHistory(true);
     }
   }
 
@@ -440,7 +487,10 @@ function App() {
     <main className="app-frame">
       <header className="main-header">
         <div>
-          <h1>Swidex</h1>
+          <div className="brand-line">
+            <h1>Swidex</h1>
+            <span>v{APP_VERSION}</span>
+          </div>
           <p className="subtitle">Codex 账号与中转站切换</p>
         </div>
         <div className={`status-chip ${riskCount > 0 ? "warn" : "clean"}`}>
@@ -450,6 +500,20 @@ function App() {
           <button onClick={() => setShowDoctor(true)}>诊断</button>
           <button onClick={() => setShowLog(true)}>日志</button>
           <button onClick={() => setConfirmBackup(true)} disabled={task !== null}>备份历史</button>
+          <button
+            className={`sync-menu-button ${report?.historyUnify.enabled ? "enabled" : ""}`}
+            onClick={() => {
+              const nextMode = report?.historyUnify.enabled ? "disable" : "enable";
+              setHistoryPrompt(nextMode);
+              setMigrateExistingHistory(nextMode === "enable");
+              setRestoreMigratedHistory(true);
+            }}
+            disabled={task !== null}
+          >
+            <History />
+            同步历史
+            <span>{report?.historyUnify.enabled ? "开" : "关"}</span>
+          </button>
           <button onClick={() => setConfirmAuth(true)}>重置登录</button>
           <button className="primary-action" onClick={() => openEditor()}>
             <Plus />
@@ -482,7 +546,7 @@ function App() {
                   onClick={() => (provider.id === "official" ? setConfirmChatgpt(true) : askEnableProxy(provider))}
                   disabled={task !== null}
                 >
-                  {task === "proxy" || task === "chatgpt" ? "处理中" : "启用"}
+                  {task === "proxy" || task === "chatgpt" ? "处理中" : active ? "重启" : "启用"}
                 </button>
                 {provider.id !== "official" && <button onClick={() => openEditor(provider)}>编辑</button>}
                 {provider.id !== "official" && provider.id !== "current-proxy" && (
@@ -587,6 +651,20 @@ function App() {
         />
       )}
 
+      {historyPrompt && (
+        <HistoryUnifyDialog
+          mode={historyPrompt}
+          status={report?.historyUnify}
+          migrateExisting={migrateExistingHistory}
+          restoreMigrated={restoreMigratedHistory}
+          loading={task === "historyUnify"}
+          onMigrateExistingChange={setMigrateExistingHistory}
+          onRestoreMigratedChange={setRestoreMigratedHistory}
+          onCancel={() => setHistoryPrompt(null)}
+          onConfirm={applyHistoryUnify}
+        />
+      )}
+
       {proxyPrompt && (
         <ProxyConfirmDialog
           provider={proxyPrompt}
@@ -610,6 +688,82 @@ function App() {
   );
 }
 
+function HistoryUnifyDialog({
+  mode,
+  status,
+  migrateExisting,
+  restoreMigrated,
+  loading,
+  onMigrateExistingChange,
+  onRestoreMigratedChange,
+  onCancel,
+  onConfirm
+}: {
+  mode: "enable" | "disable";
+  status?: HistoryUnifyStatus;
+  migrateExisting: boolean;
+  restoreMigrated: boolean;
+  loading: boolean;
+  onMigrateExistingChange: (value: boolean) => void;
+  onRestoreMigratedChange: (value: boolean) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const enable = mode === "enable";
+  const hasMigrationBackups = (status?.migrationBackups ?? 0) > 0;
+  return (
+    <div className="overlay" role="dialog" aria-modal="true">
+      <section className="confirm-box history-dialog">
+        <h2>{enable ? "开启同步对话历史" : "关闭同步对话历史"}</h2>
+        <div className="dialog-note">
+          <strong>{enable ? "开启说明" : "关闭说明"}</strong>
+          <span>
+            {enable
+              ? "开启后，官方账号与中转或定制供应商会共用同一个历史 / 续聊列表。默认会把现有官方会话也同步进来；认证和当前请求通道都不变。"
+              : "关闭后，官方账号与中转或定制供应商会恢复各自的历史列表。能按备份分清来源的官方会话会还原；分不清的新会话会留在原共享历史里。"}
+            这个开关不区分“官方切中转”或“中转切官方”；它不会改变当前请求通道。
+          </span>
+        </div>
+        {enable ? (
+          <label className="checkline dialog-checkline">
+            <input
+              type="checkbox"
+              checked={migrateExisting}
+              onChange={(event) => onMigrateExistingChange(event.target.checked)}
+            />
+            <span>同步现有官方会话历史</span>
+            <HelpTip text="默认勾选。会先备份 sessions、archived_sessions 和 state_5.sqlite，再把可识别的官方老会话迁入共享历史列表；取消勾选则只同步之后新建的会话。" />
+          </label>
+        ) : (
+          <label className={`checkline dialog-checkline ${hasMigrationBackups ? "" : "muted-check"}`}>
+            <input
+              type="checkbox"
+              checked={restoreMigrated && hasMigrationBackups}
+              disabled={!hasMigrationBackups}
+              onChange={(event) => onRestoreMigratedChange(event.target.checked)}
+            />
+            <span>按备份还原当初迁入的官方会话</span>
+            <HelpTip text="只还原迁移备份里能证明原本属于官方、且当前仍在共享列表里的会话；开启期间新建的会话无法可靠判断来源，会留在中转或定制供应商历史里，避免误伤。" />
+          </label>
+        )}
+        <div className="history-dialog-grid">
+          <span>会话文件：{(status?.sessionFiles ?? 0) + (status?.archivedFiles ?? 0)}</span>
+          <span>官方历史：{formatThreadCount(status?.openaiThreads)}</span>
+          <span>共享历史：{formatThreadCount(status?.codexThreads)}</span>
+          <span>迁移备份：{status?.migrationBackups ?? 0}</span>
+        </div>
+        <div>
+          <button className="plain-button" onClick={onCancel}>取消</button>
+          <button className="primary-button" onClick={onConfirm} disabled={loading}>
+            {loading ? <Loader2 className="spin" /> : null}
+            {enable ? "我已了解，开启" : "关闭同步"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function InlineMessage({ tone, text }: { tone: "good" | "bad"; text: string }) {
   return (
     <div className={`inline-message ${tone}`}>
@@ -627,7 +781,8 @@ function DoctorLines({ report, riskCount }: { report: DoctorReport | null; riskC
   return (
     <div className="doctor-lines">
       <InfoLine label="风险项" value={String(riskCount)} hot={riskCount > 0} />
-      <InfoLine label="model_provider" value={report?.modelProvider ?? "未设置"} hot={report?.modelProvider === "codex"} />
+      <InfoLine label="统一历史" value={report?.historyUnify.enabled ? "开启" : "关闭"} hot={Boolean(report?.historyUnify.enabled && !report?.historyUnify.configUnified)} />
+      <InfoLine label="model_provider" value={report?.modelProvider ?? "未设置"} hot={report?.modelProvider === "codex" && !report?.historyUnify.configUnified} />
       <InfoLine label="base_url" value={report?.baseUrl ? compactUrl(report.baseUrl) : "无"} hot={Boolean(report?.baseUrl)} />
       <InfoLine label="env_key" value={report?.envKey ?? "无"} hot={Boolean(report?.envKey)} />
       <InfoLine label="进程环境变量" value={`${envCount} set`} hot={envCount > 0} />
@@ -865,7 +1020,19 @@ function mockReport(): DoctorReport {
     shellResidues: [],
     launchctl: [],
     conclusion: "当前看起来是 ChatGPT 账号模式",
-    warnings: []
+    warnings: [],
+    historyUnify: {
+      enabled: false,
+      configUnified: false,
+      sessionFiles: 0,
+      archivedFiles: 0,
+      openaiThreads: null,
+      codexThreads: null,
+      otherThreads: null,
+      sqliteStatus: "preview",
+      migrationBackups: 0,
+      restoreBackups: 0
+    }
   };
 }
 
@@ -892,9 +1059,14 @@ function normalizeProxyPath(value: string) {
 
 function statusLabel(report: DoctorReport | null, riskCount: number) {
   if (!report) return "状态读取中";
+  if (report.historyUnify.configUnified) return "官方模式 · 统一历史";
   if (report.modelProvider === "codex") return "中转站模式";
   if (riskCount > 0) return "可能走中转站";
   return "官方模式";
+}
+
+function formatThreadCount(value?: number | null) {
+  return typeof value === "number" ? String(value) : "未知";
 }
 
 function compactUrl(url: string) {

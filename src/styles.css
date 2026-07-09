@@ -71,6 +71,22 @@ h1 {
   letter-spacing: 0;
 }
 
+.brand-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.brand-line span {
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: #202026;
+  color: #bfc0ca;
+  font-size: 12px;
+  font-weight: 720;
+}
+
 .subtitle,
 .page-header p {
   margin-top: 4px;
@@ -158,6 +174,37 @@ svg {
 
 .primary-action {
   min-width: 124px;
+}
+
+.sync-menu-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sync-menu-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.sync-menu-button span {
+  margin-left: 1px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #303038;
+  color: #cfd0d8;
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.sync-menu-button.enabled {
+  color: #c8f5d0 !important;
+  background: rgba(50, 215, 75, 0.1) !important;
+}
+
+.sync-menu-button.enabled span {
+  background: rgba(50, 215, 75, 0.16);
+  color: #c8f5d0;
 }
 
 .provider-list {
@@ -735,6 +782,57 @@ pre {
 
 .dialog-checkline {
   margin-bottom: 0;
+}
+
+.history-dialog {
+  width: min(560px, 100%);
+}
+
+.history-dialog > .dialog-note {
+  display: grid;
+  justify-content: stretch;
+  gap: 5px;
+  margin-top: 16px;
+  padding: 12px 13px;
+  border: 1px solid rgba(255, 159, 10, 0.22);
+  border-radius: 12px;
+  background: rgba(255, 159, 10, 0.07);
+}
+
+.dialog-note strong {
+  color: #ffd08a;
+  font-size: 13px;
+}
+
+.dialog-note span {
+  color: #ddd0bc;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.history-dialog .dialog-checkline {
+  margin-top: 16px;
+}
+
+.muted-check {
+  opacity: 0.68;
+}
+
+.history-dialog > .history-dialog-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  justify-content: stretch;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.history-dialog-grid span {
+  padding: 8px 9px;
+  border-radius: 9px;
+  background: #18181d;
+  color: #cfd0d8;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .confirm-box.danger .primary-button {

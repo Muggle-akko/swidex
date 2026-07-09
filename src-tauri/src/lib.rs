@@ -13,7 +13,12 @@ const CONFIG_FILE: &str = ".codex/config.toml";
 const AUTH_FILE: &str = ".codex/auth.json";
 const HISTORY_FILE: &str = ".codex/history.jsonl";
 const SESSIONS_DIR: &str = ".codex/sessions";
+const ARCHIVED_SESSIONS_DIR: &str = ".codex/archived_sessions";
+const STATE_FILE: &str = ".codex/state_5.sqlite";
 const BACKUP_ROOT: &str = "CodexBackups";
+const SETTINGS_FILE: &str = ".swidex/settings.json";
+const UNIFY_BACKUP_DIR: &str = "swidex-history-unify-v1";
+const UNIFY_RESTORE_BACKUP_DIR: &str = "swidex-history-unify-restore-v1";
 const KEYCHAIN_SERVICE: &str = "Swidex Proxy API Keys";
 
 const ENV_KEYS: [&str; 7] = [
@@ -86,6 +91,7 @@ pub struct DoctorReport {
     launchctl: Vec<LaunchctlStatus>,
     conclusion: String,
     warnings: Vec<String>,
+    history_unify: HistoryUnifyStatus,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -99,6 +105,40 @@ pub struct OperationResult {
     commands: Vec<String>,
     results: Vec<String>,
     report: DoctorReport,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SwidexSettings {
+    unified_session_history: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryUnifyStatus {
+    enabled: bool,
+    config_unified: bool,
+    session_files: usize,
+    archived_files: usize,
+    openai_threads: Option<i64>,
+    codex_threads: Option<i64>,
+    other_threads: Option<i64>,
+    sqlite_status: String,
+    migration_backups: usize,
+    restore_backups: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryBackupMeta {
+    kind: String,
+    created_at: String,
+    codex_home: String,
+}
+
+struct HistoryRewriteReport {
+    files: usize,
+    sqlite_rows: Option<i64>,
 }
 
 struct LaunchctlUnsetReport {
@@ -118,6 +158,150 @@ struct LaunchctlSetReport {
 #[tauri::command]
 fn doctor() -> Result<DoctorReport, String> {
     Ok(build_doctor_report())
+}
+
+#[tauri::command]
+fn set_history_unify(
+    enabled: bool,
+    migrate_existing: bool,
+    restore_migrated: bool,
+) -> Result<OperationResult, String> {
+    let home = home_dir()?;
+    let stamp = timestamp();
+    let mut actions = Vec::new();
+    let mut backups = Vec::new();
+    let mut commands = Vec::new();
+    let mut results = Vec::new();
+
+    ensure_codex_dir(&home)?;
+    let config_path = home.join(CONFIG_FILE);
+    if config_path.exists() {
+        if let Some(backup) = backup_file(&config_path, &stamp)? {
+            commands.push(format!(
+                "cp {} {}",
+                display_path(&config_path),
+                display_path(&backup)
+            ));
+            backups.push(display_path(&backup));
+        }
+    }
+
+    let mut doc = read_config_or_default(&config_path)?;
+    let current_model_provider = doc.get("model_provider").and_then(|v| v.as_str());
+    let current_provider = doc.get("model_providers").and_then(|v| v.get("codex"));
+    let current_is_proxy =
+        current_model_provider == Some("codex") && is_proxy_history_provider(current_provider);
+    let current_is_official_unified = is_official_history_provider(current_provider)
+        && current_model_provider == Some("codex");
+    let mut config_changed = false;
+    if enabled {
+        if current_is_proxy {
+            actions.push(
+                "已开启同步对话历史；当前仍保持中转或定制供应商，切回官方时会自动加入同一历史列表。"
+                    .to_string(),
+            );
+            results.push("config.toml: 当前为中转/定制供应商，未切换当前请求通道。".to_string());
+        } else {
+            set_model_provider(&mut doc, "codex");
+            upsert_official_history_provider(&mut doc);
+            config_changed = true;
+            actions.push("已开启同步对话历史：官方账号会和中转/定制供应商显示在同一历史列表。".to_string());
+            results.push("config.toml: model_provider=codex（官方登录形态）。".to_string());
+        }
+    } else {
+        if current_is_proxy {
+            actions.push(
+                "已关闭同步对话历史；当前仍保持中转或定制供应商，切回官方时会恢复官方独立历史列表。"
+                    .to_string(),
+            );
+            results.push("config.toml: 当前为中转/定制供应商，未切换当前请求通道。".to_string());
+        } else if current_is_official_unified
+            || current_model_provider != Some("codex")
+        {
+            set_model_provider(&mut doc, "openai");
+            remove_proxy_state(&mut doc);
+            config_changed = true;
+            actions.push("已关闭同步对话历史：官方账号恢复独立历史列表。".to_string());
+            results.push("config.toml: model_provider=openai，codex provider 已移除。".to_string());
+        }
+    }
+    if config_changed {
+        write_config(&config_path, &doc)?;
+        commands.push(format!("write {}", display_path(&config_path)));
+    }
+
+    save_settings(
+        &home,
+        &SwidexSettings {
+            unified_session_history: enabled,
+        },
+    )?;
+    commands.push(format!("write {}", display_path(&home.join(SETTINGS_FILE))));
+    results.push(format!(
+        "settings: unified_session_history={}",
+        enabled
+    ));
+
+    if enabled && migrate_existing {
+        let report = migrate_official_history(&home, &stamp)?;
+        backups.push(report.0);
+        actions.push(format!(
+            "已迁入现有官方会话：{} 个会话文件，{} 条索引记录。",
+            report.1.files,
+            format_optional_count(report.1.sqlite_rows)
+        ));
+        commands.extend(report.2);
+        results.push(format!(
+            "history migrate: files={}, sqlite_rows={}",
+            report.1.files,
+            format_optional_count(report.1.sqlite_rows)
+        ));
+    } else if enabled {
+        actions.push("未迁入旧会话；开启后新建的官方会话会进入共享列表。".to_string());
+        results.push("history migrate: skipped by user。".to_string());
+    }
+
+    if !enabled && restore_migrated {
+        let report = restore_official_history(&home, &stamp)?;
+        if let Some(backup) = report.0 {
+            backups.push(backup);
+        }
+        actions.push(format!(
+            "已按备份还原可识别的官方会话：{} 个会话文件，{} 条索引记录。",
+            report.1.files,
+            format_optional_count(report.1.sqlite_rows)
+        ));
+        commands.extend(report.2);
+        results.push(format!(
+            "history restore: files={}, sqlite_rows={}",
+            report.1.files,
+            format_optional_count(report.1.sqlite_rows)
+        ));
+    } else if !enabled {
+        actions.push("未按备份还原；已迁入或开启期间产生的会话会留在 codex 历史桶。".to_string());
+        results.push("history restore: skipped by user。".to_string());
+    }
+
+    let report = build_doctor_report();
+    results.extend(report_results(&report));
+    Ok(OperationResult {
+        ok: true,
+        title: if enabled {
+            "同步对话历史已开启".to_string()
+        } else {
+            "同步对话历史已关闭".to_string()
+        },
+        message: if enabled {
+            "官方账号与中转/定制供应商会进入同一个历史列表；认证和当前请求通道不会被这个开关混用。".to_string()
+        } else {
+            "官方账号与中转/定制供应商会恢复各自的历史列表；开启期间的新会话会留在中转/定制供应商历史里。".to_string()
+        },
+        backups,
+        actions,
+        commands,
+        results,
+        report,
+    })
 }
 
 #[tauri::command]
@@ -142,14 +326,31 @@ fn use_chatgpt() -> Result<OperationResult, String> {
         }
     }
 
+    let settings = read_settings(&home);
     let mut doc = read_config_or_default(&config_path)?;
-    set_model_provider(&mut doc, "openai");
-    remove_proxy_state(&mut doc);
+    if settings.unified_session_history {
+        set_model_provider(&mut doc, "codex");
+        remove_proxy_state(&mut doc);
+        upsert_official_history_provider(&mut doc);
+    } else {
+        set_model_provider(&mut doc, "openai");
+        remove_proxy_state(&mut doc);
+    }
     write_config(&config_path, &doc)?;
     commands.push(format!("write {}", display_path(&config_path)));
-    actions
-        .push("已将 Codex provider 切回 openai，并移除 codex 中转站 provider 配置。".to_string());
-    results.push("config.toml: model_provider=openai，codex provider 已移除。".to_string());
+    if settings.unified_session_history {
+        actions.push(
+            "已切回 ChatGPT 官方账号；同步对话历史开启时，新会话会继续进入共享历史列表。".to_string(),
+        );
+        results.push(
+            "config.toml: model_provider=codex（官方登录形态），中转站 base_url/env_key 已移除。"
+                .to_string(),
+        );
+    } else {
+        actions
+            .push("已将 Codex provider 切回 openai，并移除 codex 中转站 provider 配置。".to_string());
+        results.push("config.toml: model_provider=openai，codex provider 已移除。".to_string());
+    }
 
     for shell_file in SHELL_FILES {
         let path = home.join(shell_file);
@@ -464,6 +665,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             doctor,
+            set_history_unify,
             use_chatgpt,
             use_proxy,
             save_provider_secret,
@@ -495,6 +697,7 @@ fn build_doctor_report() -> DoctorReport {
                 launchctl: launchctl_statuses(),
                 conclusion: "当前状态不确定".to_string(),
                 warnings: vec![err],
+                history_unify: HistoryUnifyStatus::fallback(),
             };
         }
     };
@@ -525,6 +728,8 @@ fn build_doctor_report() -> DoctorReport {
         .and_then(|v| v.get("env_key"))
         .and_then(|v| v.as_str())
         .map(ToOwned::to_owned);
+    let history_unify = build_history_unify_status(&home, doc.as_ref());
+    let official_unified = history_unify.config_unified;
 
     let suspicious_domains = suspicious_hits(&config_text);
     let env = env_statuses();
@@ -536,7 +741,7 @@ fn build_doctor_report() -> DoctorReport {
     let env_any = env.iter().any(|item| item.set);
     let shell_any = shell_residues.iter().any(|item| !item.matches.is_empty());
     let launch_any = launchctl.iter().any(|item| item.set);
-    let proxyish = model_provider.as_deref() == Some("codex")
+    let proxyish = (model_provider.as_deref() == Some("codex") && !official_unified)
         || base_url.is_some()
         || env_key.is_some()
         || !suspicious_domains.is_empty()
@@ -544,7 +749,9 @@ fn build_doctor_report() -> DoctorReport {
         || shell_any
         || launch_any;
 
-    let conclusion = if proxyish {
+    let conclusion = if official_unified && !proxyish {
+        "当前看起来是 ChatGPT 账号模式（统一历史已开启）".to_string()
+    } else if proxyish {
         "当前看起来仍可能走 API / 中转站".to_string()
     } else if model_provider.as_deref() == Some("openai") || model_provider.is_none() {
         "当前看起来是 ChatGPT 账号模式".to_string()
@@ -584,6 +791,7 @@ fn build_doctor_report() -> DoctorReport {
         launchctl,
         conclusion,
         warnings,
+        history_unify,
     }
 }
 
@@ -637,6 +845,23 @@ fn write_config(path: &Path, doc: &DocumentMut) -> Result<(), String> {
     fs::write(path, doc.to_string()).map_err(to_string_err)
 }
 
+fn read_settings(home: &Path) -> SwidexSettings {
+    let path = home.join(SETTINGS_FILE);
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<SwidexSettings>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(home: &Path, settings: &SwidexSettings) -> Result<(), String> {
+    let path = home.join(SETTINGS_FILE);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(to_string_err)?;
+    }
+    let text = serde_json::to_string_pretty(settings).map_err(to_string_err)?;
+    fs::write(path, format!("{}\n", text)).map_err(to_string_err)
+}
+
 fn set_model_provider(doc: &mut DocumentMut, provider: &str) {
     doc["model_provider"] = value(provider);
 }
@@ -664,6 +889,109 @@ fn upsert_proxy_provider(doc: &mut DocumentMut, url: &str) {
     doc["model_providers"]["codex"]["base_url"] = value(url);
     doc["model_providers"]["codex"]["supports_websockets"] = value(false);
     doc["model_providers"]["codex"]["env_key"] = value("CODEX_API_KEY");
+}
+
+fn upsert_official_history_provider(doc: &mut DocumentMut) {
+    doc.as_table_mut().remove("openai_base_url");
+    if !doc.as_table().contains_key("model_providers") {
+        doc["model_providers"] = Item::Table(Table::new());
+    }
+    doc["model_providers"]["codex"]["name"] = value("OpenAI");
+    doc["model_providers"]["codex"]["wire_api"] = value("responses");
+    doc["model_providers"]["codex"]["requires_openai_auth"] = value(true);
+    doc["model_providers"]["codex"]["supports_websockets"] = value(true);
+    if let Some(provider) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.get_mut("codex"))
+        .and_then(|item| item.as_table_mut())
+    {
+        provider.remove("base_url");
+        provider.remove("env_key");
+    }
+}
+
+fn is_official_history_provider(provider: Option<&Item>) -> bool {
+    let Some(provider) = provider else {
+        return false;
+    };
+    let requires_openai_auth = provider
+        .get("requires_openai_auth")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_base_url = provider.get("base_url").and_then(|v| v.as_str()).is_some();
+    let has_env_key = provider.get("env_key").and_then(|v| v.as_str()).is_some();
+    requires_openai_auth && !has_base_url && !has_env_key
+}
+
+fn is_proxy_history_provider(provider: Option<&Item>) -> bool {
+    let Some(provider) = provider else {
+        return false;
+    };
+    let has_base_url = provider.get("base_url").and_then(|v| v.as_str()).is_some();
+    let has_env_key = provider.get("env_key").and_then(|v| v.as_str()).is_some();
+    let requires_openai_auth = provider
+        .get("requires_openai_auth")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    has_base_url || has_env_key || !requires_openai_auth
+}
+
+impl HistoryUnifyStatus {
+    fn fallback() -> Self {
+        HistoryUnifyStatus {
+            enabled: false,
+            config_unified: false,
+            session_files: 0,
+            archived_files: 0,
+            openai_threads: None,
+            codex_threads: None,
+            other_threads: None,
+            sqlite_status: "unavailable".to_string(),
+            migration_backups: 0,
+            restore_backups: 0,
+        }
+    }
+}
+
+fn build_history_unify_status(home: &Path, doc: Option<&DocumentMut>) -> HistoryUnifyStatus {
+    let settings = read_settings(home);
+    let config_unified = doc
+        .map(|doc| {
+            doc.get("model_provider").and_then(|v| v.as_str()) == Some("codex")
+                && is_official_history_provider(
+                    doc.get("model_providers").and_then(|v| v.get("codex")),
+                )
+        })
+        .unwrap_or(false);
+    let session_files = list_jsonl_files(&home.join(SESSIONS_DIR)).len();
+    let archived_files = list_jsonl_files(&home.join(ARCHIVED_SESSIONS_DIR)).len();
+    let (openai_threads, codex_threads, other_threads, sqlite_status) =
+        sqlite_provider_counts(&home.join(STATE_FILE));
+
+    HistoryUnifyStatus {
+        enabled: settings.unified_session_history,
+        config_unified,
+        session_files,
+        archived_files,
+        openai_threads,
+        codex_threads,
+        other_threads,
+        sqlite_status,
+        migration_backups: backup_generation_count(home, UNIFY_BACKUP_DIR),
+        restore_backups: backup_generation_count(home, UNIFY_RESTORE_BACKUP_DIR),
+    }
+}
+
+fn backup_generation_count(home: &Path, name: &str) -> usize {
+    fs::read_dir(home.join(BACKUP_ROOT).join(name))
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().is_dir())
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 fn clean_shell_file(path: &Path) -> Result<usize, String> {
@@ -1027,6 +1355,337 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn list_jsonl_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_jsonl_files(root, &mut files);
+    files
+}
+
+fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_files(&path, files);
+        } else if path.extension().and_then(OsStr::to_str) == Some("jsonl") {
+            files.push(path);
+        }
+    }
+}
+
+fn migrate_official_history(
+    home: &Path,
+    stamp: &str,
+) -> Result<(String, HistoryRewriteReport, Vec<String>), String> {
+    let backup_dir = create_history_backup(home, stamp, UNIFY_BACKUP_DIR, "migrate")?;
+    let mut commands = vec![format!("mkdir -p {}", display_path(&backup_dir))];
+    let files = rewrite_history_files(home, "openai", "codex")?;
+    commands.push("rewrite session_meta model_provider: openai -> codex".to_string());
+    let sqlite_rows = update_state_provider(&home.join(STATE_FILE), "openai", "codex")?;
+    if sqlite_rows.is_some() {
+        commands.push(format!("sqlite update {}", display_path(&home.join(STATE_FILE))));
+    }
+    Ok((
+        display_path(&backup_dir),
+        HistoryRewriteReport { files, sqlite_rows },
+        commands,
+    ))
+}
+
+fn restore_official_history(
+    home: &Path,
+    stamp: &str,
+) -> Result<(Option<String>, HistoryRewriteReport, Vec<String>), String> {
+    let backups = migration_backup_dirs(home);
+    if backups.is_empty() {
+        return Ok((
+            None,
+            HistoryRewriteReport {
+                files: 0,
+                sqlite_rows: Some(0),
+            },
+            vec!["restore skipped: no migration backup".to_string()],
+        ));
+    }
+
+    let restore_backup = create_history_backup(home, stamp, UNIFY_RESTORE_BACKUP_DIR, "restore")?;
+    let mut commands = vec![format!("mkdir -p {}", display_path(&restore_backup))];
+    let mut files = 0usize;
+    for backup in &backups {
+        files += restore_history_files_from_backup(home, backup)?;
+    }
+    commands.push("rewrite session_meta model_provider by migration backups".to_string());
+
+    let mut total_rows = 0i64;
+    let mut sqlite_seen = false;
+    for backup in &backups {
+        let backup_state = backup.join("state_5.sqlite");
+        if !backup_state.exists() {
+            continue;
+        }
+        if let Some(rows) = restore_state_provider_from_backup(&home.join(STATE_FILE), &backup_state)?
+        {
+            sqlite_seen = true;
+            total_rows += rows;
+        }
+    }
+    if sqlite_seen {
+        commands.push(format!("sqlite restore {}", display_path(&home.join(STATE_FILE))));
+    }
+
+    Ok((
+        Some(display_path(&restore_backup)),
+        HistoryRewriteReport {
+            files,
+            sqlite_rows: if sqlite_seen { Some(total_rows) } else { None },
+        },
+        commands,
+    ))
+}
+
+fn create_history_backup(
+    home: &Path,
+    stamp: &str,
+    family: &str,
+    kind: &str,
+) -> Result<PathBuf, String> {
+    let backup_dir = home.join(BACKUP_ROOT).join(family).join(stamp);
+    fs::create_dir_all(&backup_dir).map_err(to_string_err)?;
+    copy_history_source_if_exists(home, SESSIONS_DIR, &backup_dir.join("sessions"))?;
+    copy_history_source_if_exists(
+        home,
+        ARCHIVED_SESSIONS_DIR,
+        &backup_dir.join("archived_sessions"),
+    )?;
+    let state = home.join(STATE_FILE);
+    if state.exists() {
+        fs::copy(&state, backup_dir.join("state_5.sqlite")).map_err(to_string_err)?;
+    }
+    let meta = HistoryBackupMeta {
+        kind: kind.to_string(),
+        created_at: stamp.to_string(),
+        codex_home: display_path(&home.join(".codex")),
+    };
+    let meta_text = serde_json::to_string_pretty(&meta).map_err(to_string_err)?;
+    fs::write(backup_dir.join("meta.json"), format!("{}\n", meta_text)).map_err(to_string_err)?;
+    Ok(backup_dir)
+}
+
+fn copy_history_source_if_exists(home: &Path, source: &str, target: &Path) -> Result<(), String> {
+    let path = home.join(source);
+    if path.exists() {
+        copy_dir_recursive(&path, target).map_err(to_string_err)?;
+    }
+    Ok(())
+}
+
+fn migration_backup_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = fs::read_dir(home.join(BACKUP_ROOT).join(UNIFY_BACKUP_DIR))
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    dirs
+}
+
+fn rewrite_history_files(home: &Path, from: &str, to: &str) -> Result<usize, String> {
+    let mut changed = 0usize;
+    for root in [home.join(SESSIONS_DIR), home.join(ARCHIVED_SESSIONS_DIR)] {
+        for file in list_jsonl_files(&root) {
+            if rewrite_session_meta_provider(&file, from, to)? {
+                changed += 1;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn restore_history_files_from_backup(home: &Path, backup_dir: &Path) -> Result<usize, String> {
+    let mut changed = 0usize;
+    for (backup_name, active_root) in [
+        ("sessions", home.join(SESSIONS_DIR)),
+        ("archived_sessions", home.join(ARCHIVED_SESSIONS_DIR)),
+    ] {
+        let backup_root = backup_dir.join(backup_name);
+        for backup_file in list_jsonl_files(&backup_root) {
+            if session_meta_provider(&backup_file)? != Some("openai".to_string()) {
+                continue;
+            }
+            let Ok(relative) = backup_file.strip_prefix(&backup_root) else {
+                continue;
+            };
+            let active_file = active_root.join(relative);
+            if active_file.exists() && rewrite_session_meta_provider(&active_file, "codex", "openai")?
+            {
+                changed += 1;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn rewrite_session_meta_provider(path: &Path, from: &str, to: &str) -> Result<bool, String> {
+    let text = fs::read_to_string(path).map_err(to_string_err)?;
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
+        return Ok(false);
+    };
+    let mut value: serde_json::Value = match serde_json::from_str(first) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    if value.get("type").and_then(|item| item.as_str()) != Some("session_meta") {
+        return Ok(false);
+    }
+    let provider = value
+        .get_mut("payload")
+        .and_then(|payload| payload.get_mut("model_provider"));
+    let Some(provider) = provider else {
+        return Ok(false);
+    };
+    if provider.as_str() != Some(from) {
+        return Ok(false);
+    }
+    *provider = serde_json::Value::String(to.to_string());
+    let mut next = serde_json::to_string(&value).map_err(to_string_err)?;
+    for line in lines {
+        next.push('\n');
+        next.push_str(line);
+    }
+    if text.ends_with('\n') {
+        next.push('\n');
+    }
+    write_atomic(path, next.as_bytes())
+}
+
+fn session_meta_provider(path: &Path) -> Result<Option<String>, String> {
+    let text = fs::read_to_string(path).map_err(to_string_err)?;
+    let Some(first) = text.lines().next() else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = match serde_json::from_str(first) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if value.get("type").and_then(|item| item.as_str()) != Some("session_meta") {
+        return Ok(None);
+    }
+    Ok(value
+        .get("payload")
+        .and_then(|payload| payload.get("model_provider"))
+        .and_then(|provider| provider.as_str())
+        .map(ToOwned::to_owned))
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<bool, String> {
+    let tmp = path.with_extension("jsonl.swidex-tmp");
+    fs::write(&tmp, bytes).map_err(to_string_err)?;
+    fs::rename(&tmp, path).map_err(to_string_err)?;
+    Ok(true)
+}
+
+fn sqlite_provider_counts(path: &Path) -> (Option<i64>, Option<i64>, Option<i64>, String) {
+    if !path.exists() {
+        return (None, None, None, "state_5.sqlite not found".to_string());
+    }
+    let sql = "SELECT provider || char(9) || COUNT(*) FROM (SELECT COALESCE(model_provider,'<empty>') AS provider FROM threads) GROUP BY provider;";
+    match run_sqlite(path, sql) {
+        Ok(output) => {
+            let mut openai = 0i64;
+            let mut codex = 0i64;
+            let mut other = 0i64;
+            for line in output.lines() {
+                let mut parts = line.split('\t');
+                let provider = parts.next().unwrap_or_default();
+                let count = parts
+                    .next()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0);
+                match provider {
+                    "openai" => openai += count,
+                    "codex" => codex += count,
+                    _ => other += count,
+                }
+            }
+            (
+                Some(openai),
+                Some(codex),
+                Some(other),
+                "ok".to_string(),
+            )
+        }
+        Err(err) => (None, None, None, err),
+    }
+}
+
+fn update_state_provider(path: &Path, from: &str, to: &str) -> Result<Option<i64>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let sql = format!(
+        "BEGIN; UPDATE threads SET model_provider={} WHERE model_provider={}; SELECT changes(); COMMIT;",
+        sql_quote(to),
+        sql_quote(from)
+    );
+    run_sqlite(path, &sql).map(|output| last_sqlite_number(&output)).map(Some)
+}
+
+fn restore_state_provider_from_backup(
+    active: &Path,
+    backup: &Path,
+) -> Result<Option<i64>, String> {
+    if !active.exists() || !backup.exists() {
+        return Ok(None);
+    }
+    let sql = format!(
+        "ATTACH DATABASE {} AS backup; BEGIN; UPDATE threads SET model_provider='openai' WHERE model_provider='codex' AND id IN (SELECT id FROM backup.threads WHERE model_provider='openai'); SELECT changes(); COMMIT; DETACH DATABASE backup;",
+        sql_quote(&display_path(backup))
+    );
+    run_sqlite(active, &sql)
+        .map(|output| last_sqlite_number(&output))
+        .map(Some)
+}
+
+fn run_sqlite(path: &Path, sql: &str) -> Result<String, String> {
+    let output = Command::new("sqlite3")
+        .arg(path)
+        .arg(sql)
+        .output()
+        .map_err(|err| format!("无法运行 sqlite3：{}", err))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("sqlite3 失败：{}", stderr.trim()))
+    }
+}
+
+fn sql_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn last_sqlite_number(output: &str) -> i64 {
+    output
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+fn format_optional_count(count: Option<i64>) -> String {
+    count
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "未找到索引库".to_string())
+}
+
 fn env_statuses() -> Vec<EnvStatus> {
     ENV_KEYS
         .iter()
@@ -1162,6 +1821,21 @@ fn report_results(report: &DoctorReport) -> Vec<String> {
             report.model_provider.as_deref().unwrap_or("未设置"),
             report.base_url.as_deref().unwrap_or("无"),
             report.env_key.as_deref().unwrap_or("无")
+        ),
+        format!(
+            "history_unify: enabled={}, config_unified={}, openai_threads={}, codex_threads={}",
+            report.history_unify.enabled,
+            report.history_unify.config_unified,
+            report
+                .history_unify
+                .openai_threads
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "未知".to_string()),
+            report
+                .history_unify
+                .codex_threads
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "未知".to_string())
         ),
         format!("codex login status: {}", report.codex_status),
     ]
