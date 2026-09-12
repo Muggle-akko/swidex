@@ -1,7 +1,7 @@
 [package]
 name = "swidex"
 version = "0.1.2"
-description = "A small macOS desktop switcher for Codex ChatGPT and proxy modes."
+description = "A small Linux and macOS desktop switcher for Codex ChatGPT and proxy modes."
 authors = ["awu"]
 edition = "2021"
 license = "MIT"

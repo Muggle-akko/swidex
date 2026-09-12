@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Swidex
+Comment=Codex account and provider manager
+Comment[zh_CN]=Codex 账号、中转站切换与诊断
+Exec=swidex
+Icon=swidex
+Terminal=false
+Categories=Development;
+StartupWMClass=swidex
+Keywords=Codex;API;Swidex;

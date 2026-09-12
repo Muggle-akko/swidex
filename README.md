@@ -2,6 +2,8 @@
 
 # Swidex
 
+Linux / Omarchy 本地移植版现已支持原生图形界面与 Linux 系统密钥环，构建和安装见 [Linux 使用说明](docs/linux.md)。下文的 macOS 发布说明仍适用于原版。
+
 ### 让 Codex 的账号与中转站切换，清楚、干净、可回退
 
 Swidex 是一款专为 macOS 打造的 Codex 桌面工具。在 **ChatGPT 官方账号** 与 **API / 中转站** 之间切换时，它会替你检查真实状态、清理配置残留、保护 API Key，并尽可能保持对话历史连续。

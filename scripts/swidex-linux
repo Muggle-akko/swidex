@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Desktop sessions may not have Mise's Codex shims on PATH.
+export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
+exec "$HOME/.local/lib/swidex/swidex" "$@"

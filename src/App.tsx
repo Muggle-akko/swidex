@@ -377,7 +377,7 @@ function App() {
     try {
       const secret = await getProviderSecret(provider.id);
       if (secret) return secret;
-      setError("未在 macOS 钥匙串找到这个中转站的 Key，请编辑后重新保存。");
+      setError("未在系统密钥环找到这个中转站的 Key，请编辑后重新保存。");
       return "";
     } catch (err) {
       setError(String(err));
@@ -411,7 +411,7 @@ function App() {
           </button>
           <div>
             <h1>中转站配置</h1>
-            <p>Key 会加密保存到 macOS 钥匙串，启用时自动带入。</p>
+            <p>Key 会加密保存到系统密钥环，启用时自动带入。</p>
           </div>
         </header>
 
@@ -463,8 +463,8 @@ function App() {
               checked={draft.persistKey}
               onChange={(event) => setDraft({ ...draft, persistKey: event.target.checked })}
             />
-            <span>持久化到 shell/launchctl</span>
-            <HelpTip text="把 API 地址和 Key 写进 ~/.zshrc，并同步给 launchctl。这样新打开的终端或从 Dock 启动的 Codex 也能读到；软件内保存的 Key 另存在 macOS 钥匙串里。" />
+            <span>持久化到 shell/桌面环境</span>
+            <HelpTip text="将 API 地址和 Key 明文写入 shell 启动文件（Linux: ~/.bashrc；macOS: ~/.zshrc），并同步到当前桌面会话。Linux 重新登录后，请从新终端启动 Codex，或再次启用中转站。保存中转站时的 Key 副本仍在系统密钥环中。" />
           </label>
         </form>
 
@@ -620,7 +620,7 @@ function App() {
       {confirmChatgpt && (
         <ConfirmDialog
           title="切换到 ChatGPT 官方账号"
-          body={`会把 Codex 配置切回官方账号模式，并清理中转站 provider、shell 启动文件和 launchctl 环境变量。不会删除 auth.json，也不会让你退出登录。当前终端若仍有残留，可执行：${unsetSnippet}`}
+          body={`会把 Codex 配置切回官方账号模式，并清理中转站 provider、shell 启动文件和 桌面会话环境变量。不会删除 auth.json，也不会让你退出登录。当前终端若仍有残留，可执行：${unsetSnippet}`}
           confirmText="启用官方"
           loading={task === "chatgpt"}
           onCancel={() => setConfirmChatgpt(false)}
@@ -786,7 +786,7 @@ function DoctorLines({ report, riskCount }: { report: DoctorReport | null; riskC
       <InfoLine label="base_url" value={report?.baseUrl ? compactUrl(report.baseUrl) : "无"} hot={Boolean(report?.baseUrl)} />
       <InfoLine label="env_key" value={report?.envKey ?? "无"} hot={Boolean(report?.envKey)} />
       <InfoLine label="进程环境变量" value={`${envCount} set`} hot={envCount > 0} />
-      <InfoLine label="launchctl" value={`${launchCount} set`} hot={launchCount > 0} />
+      <InfoLine label="桌面会话环境" value={`${launchCount} set`} hot={launchCount > 0} />
       <InfoLine label="shell 残留" value={`${shellCount} 行`} hot={shellCount > 0} />
       <pre>{report?.codexStatus ?? "codex login status 读取中..."}</pre>
     </div>
@@ -940,8 +940,8 @@ function ProxyConfirmDialog({
             checked={persistKey}
             onChange={(event) => onPersistKeyChange(event.target.checked)}
           />
-          <span>持久化到 shell/launchctl</span>
-          <HelpTip text="把 API 地址和 Key 写进 ~/.zshrc，并同步给 launchctl。这样新打开的终端或从 Dock 启动的 Codex 也能读到；软件内保存的 Key 另存在 macOS 钥匙串里。" />
+          <span>持久化到 shell/桌面环境</span>
+          <HelpTip text="将 API 地址和 Key 明文写入 shell 启动文件（Linux: ~/.bashrc；macOS: ~/.zshrc），并同步到当前桌面会话。Linux 重新登录后，请从新终端启动 Codex，或再次启用中转站。保存中转站时的 Key 副本仍在系统密钥环中。" />
         </label>
         <div>
           <button className="plain-button" onClick={onCancel}>取消</button>

@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+mod linux;
 use toml_edit::{value, DocumentMut, Item, Table};
 
 const CONFIG_FILE: &str = ".codex/config.toml";
@@ -191,8 +192,8 @@ fn set_history_unify(
     let current_provider = doc.get("model_providers").and_then(|v| v.get("codex"));
     let current_is_proxy =
         current_model_provider == Some("codex") && is_proxy_history_provider(current_provider);
-    let current_is_official_unified = is_official_history_provider(current_provider)
-        && current_model_provider == Some("codex");
+    let current_is_official_unified =
+        is_official_history_provider(current_provider) && current_model_provider == Some("codex");
     let mut config_changed = false;
     if enabled {
         if current_is_proxy {
@@ -205,7 +206,9 @@ fn set_history_unify(
             set_model_provider(&mut doc, "codex");
             upsert_official_history_provider(&mut doc);
             config_changed = true;
-            actions.push("已开启同步对话历史：官方账号会和中转/定制供应商显示在同一历史列表。".to_string());
+            actions.push(
+                "已开启同步对话历史：官方账号会和中转/定制供应商显示在同一历史列表。".to_string(),
+            );
             results.push("config.toml: model_provider=codex（官方登录形态）。".to_string());
         }
     } else {
@@ -215,9 +218,7 @@ fn set_history_unify(
                     .to_string(),
             );
             results.push("config.toml: 当前为中转/定制供应商，未切换当前请求通道。".to_string());
-        } else if current_is_official_unified
-            || current_model_provider != Some("codex")
-        {
+        } else if current_is_official_unified || current_model_provider != Some("codex") {
             set_model_provider(&mut doc, "openai");
             remove_proxy_state(&mut doc);
             config_changed = true;
@@ -237,10 +238,7 @@ fn set_history_unify(
         },
     )?;
     commands.push(format!("write {}", display_path(&home.join(SETTINGS_FILE))));
-    results.push(format!(
-        "settings: unified_session_history={}",
-        enabled
-    ));
+    results.push(format!("settings: unified_session_history={}", enabled));
 
     if enabled && migrate_existing {
         let report = migrate_official_history(&home, &stamp)?;
@@ -292,7 +290,8 @@ fn set_history_unify(
             "同步对话历史已关闭".to_string()
         },
         message: if enabled {
-            "官方账号与中转/定制供应商会进入同一个历史列表；认证和当前请求通道不会被这个开关混用。".to_string()
+            "官方账号与中转/定制供应商会进入同一个历史列表；认证和当前请求通道不会被这个开关混用。"
+                .to_string()
         } else {
             "官方账号与中转/定制供应商会恢复各自的历史列表；开启期间的新会话会留在中转/定制供应商历史里。".to_string()
         },
@@ -340,15 +339,17 @@ fn use_chatgpt() -> Result<OperationResult, String> {
     commands.push(format!("write {}", display_path(&config_path)));
     if settings.unified_session_history {
         actions.push(
-            "已切回 ChatGPT 官方账号；同步对话历史开启时，新会话会继续进入共享历史列表。".to_string(),
+            "已切回 ChatGPT 官方账号；同步对话历史开启时，新会话会继续进入共享历史列表。"
+                .to_string(),
         );
         results.push(
             "config.toml: model_provider=codex（官方登录形态），中转站 base_url/env_key 已移除。"
                 .to_string(),
         );
     } else {
-        actions
-            .push("已将 Codex provider 切回 openai，并移除 codex 中转站 provider 配置。".to_string());
+        actions.push(
+            "已将 Codex provider 切回 openai，并移除 codex 中转站 provider 配置。".to_string(),
+        );
         results.push("config.toml: model_provider=openai，codex provider 已移除。".to_string());
     }
 
@@ -402,13 +403,13 @@ fn use_chatgpt() -> Result<OperationResult, String> {
     results.extend(launchctl_report.results);
     if launchctl_report.unset_count > 0 {
         actions.push(format!(
-            "已清理 {} 个 launchctl 环境变量。",
+            "已清理 {} 个桌面会话环境变量。",
             launchctl_report.unset_count
         ));
     } else if !launchctl_report.supported {
         actions.push("当前系统不支持 launchctl，已跳过 GUI 环境变量清理。".to_string());
     } else {
-        actions.push("未发现需要清理的 launchctl 环境变量。".to_string());
+        actions.push("未发现需要清理的桌面会话环境变量。".to_string());
     }
 
     let report = build_doctor_report();
@@ -475,7 +476,11 @@ fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationRes
     results.push("CODEX_API_KEY: 已设置（日志已隐藏明文）。".to_string());
 
     if persist_key {
-        let zshrc = home.join(".zshrc");
+        let zshrc = home.join(if cfg!(target_os = "linux") {
+            ".bashrc"
+        } else {
+            ".zshrc"
+        });
         if zshrc.exists() {
             if let Some(backup) = backup_file(&zshrc, &stamp)? {
                 commands.push(format!(
@@ -492,25 +497,25 @@ fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationRes
             display_path(&zshrc)
         ));
         actions.push(
-            "已按你的选择把 OPENAI_BASE_URL、OPENAI_API_KEY 和 CODEX_API_KEY 持久化到 ~/.zshrc。"
+            "已按你的选择把 OPENAI_BASE_URL、OPENAI_API_KEY 和 CODEX_API_KEY 持久化到 shell 启动文件。"
                 .to_string(),
         );
-        results.push("OPENAI_BASE_URL: 已持久化到 ~/.zshrc。".to_string());
-        results.push("OPENAI_API_KEY: 已持久化到 ~/.zshrc（日志已隐藏明文）。".to_string());
-        results.push("CODEX_API_KEY: 已持久化到 ~/.zshrc（日志已隐藏明文）。".to_string());
+        results.push("OPENAI_BASE_URL: 已持久化到 shell 启动文件。".to_string());
+        results.push("OPENAI_API_KEY: 已持久化到 shell 启动文件（日志已隐藏明文）。".to_string());
+        results.push("CODEX_API_KEY: 已持久化到 shell 启动文件（日志已隐藏明文）。".to_string());
 
         let launchctl_report = set_launchctl_proxy_envs(&normalized_url, trimmed_key);
         commands.extend(launchctl_report.commands);
         results.extend(launchctl_report.results);
         if launchctl_report.set_count > 0 {
             actions.push(format!(
-                "已同步 {} 个 launchctl 环境变量，重新打开 GUI 应用后会继承。",
+                "已同步 {} 个桌面会话环境变量，重新打开 GUI 应用后会继承。",
                 launchctl_report.set_count
             ));
         } else if !launchctl_report.supported {
             actions.push("当前系统不支持 launchctl，已跳过 GUI 环境变量同步。".to_string());
         } else {
-            actions.push("launchctl 环境变量同步未成功，请查看结果日志。".to_string());
+            actions.push("桌面会话环境变量同步未成功，请查看结果日志。".to_string());
         }
     } else {
         actions.push("未持久化 API key。可用下方临时命令从终端启动 Codex。".to_string());
@@ -773,7 +778,7 @@ fn build_doctor_report() -> DoctorReport {
         warnings.push("shell 启动文件中发现疑似中转站或 API key 配置残留。".to_string());
     }
     if launch_any {
-        warnings.push("launchctl 中发现环境变量残留，从 Dock 启动的应用可能会继承。".to_string());
+        warnings.push("桌面会话中发现环境变量残留，从桌面启动的应用可能会继承。".to_string());
     }
 
     DoctorReport {
@@ -1028,6 +1033,9 @@ fn is_shell_residue_line(line: &str) -> bool {
 }
 
 fn unset_launchctl_envs() -> LaunchctlUnsetReport {
+    if cfg!(target_os = "linux") {
+        return linux::unset_envs();
+    }
     let mut commands = Vec::new();
     let mut results = Vec::new();
     if !cfg!(target_os = "macos") {
@@ -1078,6 +1086,9 @@ fn unset_launchctl_envs() -> LaunchctlUnsetReport {
 }
 
 fn set_launchctl_proxy_envs(base_url: &str, key: &str) -> LaunchctlSetReport {
+    if cfg!(target_os = "linux") {
+        return linux::set_envs(base_url, key);
+    }
     let mut commands = Vec::new();
     let mut results = Vec::new();
     if !cfg!(target_os = "macos") {
@@ -1142,6 +1153,9 @@ fn set_runtime_proxy_envs(base_url: &str, key: &str) {
 }
 
 fn write_keychain_secret(profile_id: &str, key: &str) -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        return linux::store_secret(&keychain_account(profile_id)?, key);
+    }
     if !cfg!(target_os = "macos") {
         return Err("API Key 加密保存目前仅支持 macOS Keychain。".to_string());
     }
@@ -1167,6 +1181,9 @@ fn write_keychain_secret(profile_id: &str, key: &str) -> Result<(), String> {
 }
 
 fn read_keychain_secret(profile_id: &str) -> Result<Option<String>, String> {
+    if cfg!(target_os = "linux") {
+        return linux::read_secret(&keychain_account(profile_id)?);
+    }
     if !cfg!(target_os = "macos") {
         return Err("API Key 加密读取目前仅支持 macOS Keychain。".to_string());
     }
@@ -1195,6 +1212,9 @@ fn read_keychain_secret(profile_id: &str) -> Result<Option<String>, String> {
 }
 
 fn delete_keychain_secret(profile_id: &str) -> Result<(), String> {
+    if cfg!(target_os = "linux") {
+        return linux::delete_secret(&keychain_account(profile_id)?);
+    }
     if !cfg!(target_os = "macos") {
         return Err("API Key 加密删除目前仅支持 macOS Keychain。".to_string());
     }
@@ -1264,6 +1284,22 @@ fn persist_proxy_env(path: &Path, base_url: &str, key: &str) -> Result<(), Strin
     } else {
         format!("{}\n{}\n", cleaned, proxy_exports)
     };
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(to_string_err)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(to_string_err)?;
+        file.write_all(next.as_bytes()).map_err(to_string_err)
+    }
+    #[cfg(not(unix))]
     fs::write(path, next).map_err(to_string_err)
 }
 
@@ -1385,7 +1421,10 @@ fn migrate_official_history(
     commands.push("rewrite session_meta model_provider: openai -> codex".to_string());
     let sqlite_rows = update_state_provider(&home.join(STATE_FILE), "openai", "codex")?;
     if sqlite_rows.is_some() {
-        commands.push(format!("sqlite update {}", display_path(&home.join(STATE_FILE))));
+        commands.push(format!(
+            "sqlite update {}",
+            display_path(&home.join(STATE_FILE))
+        ));
     }
     Ok((
         display_path(&backup_dir),
@@ -1425,14 +1464,18 @@ fn restore_official_history(
         if !backup_state.exists() {
             continue;
         }
-        if let Some(rows) = restore_state_provider_from_backup(&home.join(STATE_FILE), &backup_state)?
+        if let Some(rows) =
+            restore_state_provider_from_backup(&home.join(STATE_FILE), &backup_state)?
         {
             sqlite_seen = true;
             total_rows += rows;
         }
     }
     if sqlite_seen {
-        commands.push(format!("sqlite restore {}", display_path(&home.join(STATE_FILE))));
+        commands.push(format!(
+            "sqlite restore {}",
+            display_path(&home.join(STATE_FILE))
+        ));
     }
 
     Ok((
@@ -1523,7 +1566,8 @@ fn restore_history_files_from_backup(home: &Path, backup_dir: &Path) -> Result<u
                 continue;
             };
             let active_file = active_root.join(relative);
-            if active_file.exists() && rewrite_session_meta_provider(&active_file, "codex", "openai")?
+            if active_file.exists()
+                && rewrite_session_meta_provider(&active_file, "codex", "openai")?
             {
                 changed += 1;
             }
@@ -1615,12 +1659,7 @@ fn sqlite_provider_counts(path: &Path) -> (Option<i64>, Option<i64>, Option<i64>
                     _ => other += count,
                 }
             }
-            (
-                Some(openai),
-                Some(codex),
-                Some(other),
-                "ok".to_string(),
-            )
+            (Some(openai), Some(codex), Some(other), "ok".to_string())
         }
         Err(err) => (None, None, None, err),
     }
@@ -1635,13 +1674,12 @@ fn update_state_provider(path: &Path, from: &str, to: &str) -> Result<Option<i64
         sql_quote(to),
         sql_quote(from)
     );
-    run_sqlite(path, &sql).map(|output| last_sqlite_number(&output)).map(Some)
+    run_sqlite(path, &sql)
+        .map(|output| last_sqlite_number(&output))
+        .map(Some)
 }
 
-fn restore_state_provider_from_backup(
-    active: &Path,
-    backup: &Path,
-) -> Result<Option<i64>, String> {
+fn restore_state_provider_from_backup(active: &Path, backup: &Path) -> Result<Option<i64>, String> {
     if !active.exists() || !backup.exists() {
         return Ok(None);
     }
@@ -1737,6 +1775,9 @@ fn launchctl_statuses() -> Vec<LaunchctlStatus> {
 }
 
 fn launchctl_getenv_is_set(key: &str) -> bool {
+    if cfg!(target_os = "linux") {
+        return linux::env_is_set(key);
+    }
     if !cfg!(target_os = "macos") {
         return false;
     }
@@ -1853,6 +1894,19 @@ fn to_string_err(err: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn linux_bash_persistence_preserves_network_proxy_and_cleans_api_keys() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+        let original =
+            "export HTTPS_PROXY=http://127.0.0.1:7890\nexport NO_PROXY=localhost,127.0.0.1\n";
+        fs::write(&path, original).unwrap();
+        persist_proxy_env(&path, "https://example.com/v1", "test-$value`value`").unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains(original));
+        clean_shell_file(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
 
     #[test]
     fn normalizes_proxy_url() {
