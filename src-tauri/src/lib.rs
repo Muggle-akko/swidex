@@ -5,8 +5,9 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 const CONFIG_FILE: &str = ".codex/config.toml";
@@ -191,8 +192,8 @@ fn set_history_unify(
     let current_provider = doc.get("model_providers").and_then(|v| v.get("codex"));
     let current_is_proxy =
         current_model_provider == Some("codex") && is_proxy_history_provider(current_provider);
-    let current_is_official_unified = is_official_history_provider(current_provider)
-        && current_model_provider == Some("codex");
+    let current_is_official_unified =
+        is_official_history_provider(current_provider) && current_model_provider == Some("codex");
     let mut config_changed = false;
     if enabled {
         if current_is_proxy {
@@ -205,7 +206,9 @@ fn set_history_unify(
             set_model_provider(&mut doc, "codex");
             upsert_official_history_provider(&mut doc);
             config_changed = true;
-            actions.push("已开启同步对话历史：官方账号会和中转/定制供应商显示在同一历史列表。".to_string());
+            actions.push(
+                "已开启同步对话历史：官方账号会和中转/定制供应商显示在同一历史列表。".to_string(),
+            );
             results.push("config.toml: model_provider=codex（官方登录形态）。".to_string());
         }
     } else {
@@ -215,9 +218,7 @@ fn set_history_unify(
                     .to_string(),
             );
             results.push("config.toml: 当前为中转/定制供应商，未切换当前请求通道。".to_string());
-        } else if current_is_official_unified
-            || current_model_provider != Some("codex")
-        {
+        } else if current_is_official_unified || current_model_provider != Some("codex") {
             set_model_provider(&mut doc, "openai");
             remove_proxy_state(&mut doc);
             config_changed = true;
@@ -237,10 +238,7 @@ fn set_history_unify(
         },
     )?;
     commands.push(format!("write {}", display_path(&home.join(SETTINGS_FILE))));
-    results.push(format!(
-        "settings: unified_session_history={}",
-        enabled
-    ));
+    results.push(format!("settings: unified_session_history={}", enabled));
 
     if enabled && migrate_existing {
         let report = migrate_official_history(&home, &stamp)?;
@@ -292,7 +290,8 @@ fn set_history_unify(
             "同步对话历史已关闭".to_string()
         },
         message: if enabled {
-            "官方账号与中转/定制供应商会进入同一个历史列表；认证和当前请求通道不会被这个开关混用。".to_string()
+            "官方账号与中转/定制供应商会进入同一个历史列表；认证和当前请求通道不会被这个开关混用。"
+                .to_string()
         } else {
             "官方账号与中转/定制供应商会恢复各自的历史列表；开启期间的新会话会留在中转/定制供应商历史里。".to_string()
         },
@@ -328,6 +327,7 @@ fn use_chatgpt() -> Result<OperationResult, String> {
 
     let settings = read_settings(&home);
     let mut doc = read_config_or_default(&config_path)?;
+    restore_model_catalog(&home, &mut doc)?;
     if settings.unified_session_history {
         set_model_provider(&mut doc, "codex");
         remove_proxy_state(&mut doc);
@@ -340,15 +340,17 @@ fn use_chatgpt() -> Result<OperationResult, String> {
     commands.push(format!("write {}", display_path(&config_path)));
     if settings.unified_session_history {
         actions.push(
-            "已切回 ChatGPT 官方账号；同步对话历史开启时，新会话会继续进入共享历史列表。".to_string(),
+            "已切回 ChatGPT 官方账号；同步对话历史开启时，新会话会继续进入共享历史列表。"
+                .to_string(),
         );
         results.push(
             "config.toml: model_provider=codex（官方登录形态），中转站 base_url/env_key 已移除。"
                 .to_string(),
         );
     } else {
-        actions
-            .push("已将 Codex provider 切回 openai，并移除 codex 中转站 provider 配置。".to_string());
+        actions.push(
+            "已将 Codex provider 切回 openai，并移除 codex 中转站 provider 配置。".to_string(),
+        );
         results.push("config.toml: model_provider=openai，codex provider 已移除。".to_string());
     }
 
@@ -426,7 +428,13 @@ fn use_chatgpt() -> Result<OperationResult, String> {
 }
 
 #[tauri::command]
-fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationResult, String> {
+async fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || use_proxy_impl(url, key, persist_key))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+fn use_proxy_impl(url: String, key: String, persist_key: bool) -> Result<OperationResult, String> {
     let trimmed_key = key.trim();
     if trimmed_key.is_empty() {
         return Err("API Key 不能为空。".to_string());
@@ -455,6 +463,15 @@ fn use_proxy(url: String, key: String, persist_key: bool) -> Result<OperationRes
 
     let mut doc = read_config_or_default(&config_path)?;
     set_model_provider(&mut doc, "codex");
+    // Fetch before changing the active configuration. A failed refresh must not
+    // silently reuse another relay's catalog or partially switch providers.
+    let model_ids = fetch_proxy_models(&normalized_url, trimmed_key)?;
+    let catalog_count = install_proxy_catalog(&home, &mut doc, &model_ids)?;
+    results.push(format!(
+        "已同步 {} 个具有完整元数据的模型；其余 {} 个未加入 Codex 目录。",
+        catalog_count,
+        model_ids.len().saturating_sub(catalog_count)
+    ));
     upsert_proxy_provider(&mut doc, &normalized_url);
     write_config(&config_path, &doc)?;
     commands.push(format!("write {}", display_path(&config_path)));
@@ -860,6 +877,147 @@ fn save_settings(home: &Path, settings: &SwidexSettings) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(settings).map_err(to_string_err)?;
     fs::write(path, format!("{}\n", text)).map_err(to_string_err)
+}
+
+// Keep a separate catalog rather than changing Codex's account-bound cache.
+const MODEL_CATALOG: &str = ".swidex/codex-models.json";
+const MODEL_CATALOG_STATE: &str = ".swidex/model-catalog-state.json";
+
+fn fetch_proxy_models(url: &str, key: &str) -> Result<Vec<String>, String> {
+    if key.chars().any(char::is_control) {
+        return Err("API Key 包含无效控制字符。".into());
+    }
+    // Send credentials through stdin, never command-line arguments or logs.
+    let header = format!("Authorization: Bearer {}", key)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let mut child = Command::new("/usr/bin/curl")
+        .args([
+            "--silent",
+            "--fail",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "--max-filesize",
+            "8388608",
+            "--config",
+            "-",
+            "--url",
+            &format!("{}/models", url),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "无法启动模型列表请求。".to_string())?;
+    let input = format!("header = \"{}\"\n", header);
+    let write_result = child.stdin.take().unwrap().write_all(input.as_bytes());
+    let output = child
+        .wait_with_output()
+        .map_err(|_| "读取模型列表失败。".to_string())?;
+    if write_result.is_err() || !output.status.success() {
+        return Err("模型列表同步失败，请检查中转站地址、密钥或网络；当前配置未切换。".into());
+    }
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "中转站模型列表不是有效 JSON。".to_string())?;
+    parse_proxy_model_ids(&response)
+}
+
+fn parse_proxy_model_ids(response: &serde_json::Value) -> Result<Vec<String>, String> {
+    let data = response
+        .get("data")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "中转站模型列表缺少 data 数组。".to_string())?;
+    let mut ids = Vec::new();
+    for model in data {
+        if let Some(id) = model.get("id").and_then(|v| v.as_str()) {
+            if !id.is_empty() && !ids.iter().any(|x| x == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    if ids.is_empty() {
+        return Err("中转站返回了空模型列表。".into());
+    }
+    Ok(ids)
+}
+
+fn build_model_catalog(
+    ids: &[String],
+    sources: &[serde_json::Value],
+) -> Result<serde_json::Value, String> {
+    let mut metadata = BTreeMap::new();
+    for source in sources {
+        if let Some(models) = source.get("models").and_then(|v| v.as_array()) {
+            for model in models {
+                if let Some(slug) = model.get("slug").and_then(|v| v.as_str()) {
+                    metadata.insert(slug.to_string(), model.clone());
+                }
+            }
+        }
+    }
+    let mut models = Vec::new();
+    for id in ids {
+        if let Some(model) = metadata.get(id) {
+            // Retain the exact reasoning, context, tool and instruction metadata.
+            // Hidden/internal models and image generators must stay hidden.
+            models.push(model.clone());
+        }
+    }
+    if models.is_empty() {
+        return Err("未找到可匹配的 Codex 模型元数据。请先使用官方模式刷新模型列表，再重试切换；现有配置已保留。".into());
+    }
+    Ok(serde_json::json!({"models": models}))
+}
+
+fn install_proxy_catalog(
+    home: &Path,
+    doc: &mut DocumentMut,
+    ids: &[String],
+) -> Result<usize, String> {
+    let catalog_path = home.join(MODEL_CATALOG);
+    let mut sources = Vec::new();
+    // The account cache is the latest authority; an earlier Swidex catalog is
+    // only a fallback for metadata absent from the newer account cache.
+    for path in [catalog_path.clone(), home.join(".codex/models_cache.json")] {
+        if let Ok(bytes) = fs::read(path) {
+            if let Ok(source) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                sources.push(source);
+            }
+        }
+    }
+    let catalog = build_model_catalog(ids, &sources)?;
+    fs::create_dir_all(home.join(".swidex")).map_err(to_string_err)?;
+    let current = doc.get("model_catalog_json").and_then(|v| v.as_str());
+    if current != catalog_path.to_str() {
+        let state = serde_json::json!({"previous": current});
+        write_atomic(
+            &home.join(MODEL_CATALOG_STATE),
+            &serde_json::to_vec_pretty(&state).map_err(to_string_err)?,
+        )?;
+    }
+    write_atomic(
+        &catalog_path,
+        &serde_json::to_vec_pretty(&catalog).map_err(to_string_err)?,
+    )?;
+    doc["model_catalog_json"] = value(catalog_path.to_string_lossy().as_ref());
+    Ok(catalog["models"].as_array().unwrap().len())
+}
+
+fn restore_model_catalog(home: &Path, doc: &mut DocumentMut) -> Result<(), String> {
+    let path = home.join(MODEL_CATALOG);
+    if doc.get("model_catalog_json").and_then(|v| v.as_str()) != path.to_str() {
+        return Ok(());
+    }
+    let bytes = fs::read(home.join(MODEL_CATALOG_STATE)).map_err(to_string_err)?;
+    let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(to_string_err)?;
+    if let Some(previous) = state.get("previous").and_then(|v| v.as_str()) {
+        doc["model_catalog_json"] = value(previous);
+    } else {
+        doc.as_table_mut().remove("model_catalog_json");
+    }
+    Ok(())
 }
 
 fn set_model_provider(doc: &mut DocumentMut, provider: &str) {
@@ -1385,7 +1543,10 @@ fn migrate_official_history(
     commands.push("rewrite session_meta model_provider: openai -> codex".to_string());
     let sqlite_rows = update_state_provider(&home.join(STATE_FILE), "openai", "codex")?;
     if sqlite_rows.is_some() {
-        commands.push(format!("sqlite update {}", display_path(&home.join(STATE_FILE))));
+        commands.push(format!(
+            "sqlite update {}",
+            display_path(&home.join(STATE_FILE))
+        ));
     }
     Ok((
         display_path(&backup_dir),
@@ -1425,14 +1586,18 @@ fn restore_official_history(
         if !backup_state.exists() {
             continue;
         }
-        if let Some(rows) = restore_state_provider_from_backup(&home.join(STATE_FILE), &backup_state)?
+        if let Some(rows) =
+            restore_state_provider_from_backup(&home.join(STATE_FILE), &backup_state)?
         {
             sqlite_seen = true;
             total_rows += rows;
         }
     }
     if sqlite_seen {
-        commands.push(format!("sqlite restore {}", display_path(&home.join(STATE_FILE))));
+        commands.push(format!(
+            "sqlite restore {}",
+            display_path(&home.join(STATE_FILE))
+        ));
     }
 
     Ok((
@@ -1523,7 +1688,8 @@ fn restore_history_files_from_backup(home: &Path, backup_dir: &Path) -> Result<u
                 continue;
             };
             let active_file = active_root.join(relative);
-            if active_file.exists() && rewrite_session_meta_provider(&active_file, "codex", "openai")?
+            if active_file.exists()
+                && rewrite_session_meta_provider(&active_file, "codex", "openai")?
             {
                 changed += 1;
             }
@@ -1615,12 +1781,7 @@ fn sqlite_provider_counts(path: &Path) -> (Option<i64>, Option<i64>, Option<i64>
                     _ => other += count,
                 }
             }
-            (
-                Some(openai),
-                Some(codex),
-                Some(other),
-                "ok".to_string(),
-            )
+            (Some(openai), Some(codex), Some(other), "ok".to_string())
         }
         Err(err) => (None, None, None, err),
     }
@@ -1635,13 +1796,12 @@ fn update_state_provider(path: &Path, from: &str, to: &str) -> Result<Option<i64
         sql_quote(to),
         sql_quote(from)
     );
-    run_sqlite(path, &sql).map(|output| last_sqlite_number(&output)).map(Some)
+    run_sqlite(path, &sql)
+        .map(|output| last_sqlite_number(&output))
+        .map(Some)
 }
 
-fn restore_state_provider_from_backup(
-    active: &Path,
-    backup: &Path,
-) -> Result<Option<i64>, String> {
+fn restore_state_provider_from_backup(active: &Path, backup: &Path) -> Result<Option<i64>, String> {
     if !active.exists() || !backup.exists() {
         return Ok(None);
     }
@@ -1853,6 +2013,104 @@ fn to_string_err(err: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn fetches_models_with_bearer_auth_and_rejects_http_errors() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        for status in ["200 OK", "401 Unauthorized"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let worker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with("GET /v1/models "));
+                assert!(request.contains("Authorization: Bearer test-secret"));
+                let body = r#"{"data":[{"id":"gpt-6.2-sol"},{"id":"gpt-6.2-astra"}]}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            });
+            let result = fetch_proxy_models(&format!("http://{}/v1", address), "test-secret");
+            worker.join().unwrap();
+            if status == "200 OK" {
+                assert_eq!(result.unwrap().len(), 2);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        assert!(fetch_proxy_models("http://localhost", "bad\nkey").is_err());
+    }
+
+    #[test]
+    fn catalog_filters_relay_models_and_preserves_metadata() {
+        let source = serde_json::json!({"models": [
+            {"slug":"gpt-6.2-sol", "visibility":"list", "context_window":123456,
+             "supported_reasoning_levels":[{"effort":"high","description":"High"}]},
+            {"slug":"internal", "visibility":"hide"}, {"slug":"other-relay"}
+        ]});
+        let ids = parse_proxy_model_ids(&serde_json::json!({"data":[
+            {"id":"gpt-6.2-sol"},{"id":"gpt-6.2-sol"},{"id":"gpt-image-2"},{"id":"internal"}
+        ]}))
+        .unwrap();
+        assert_eq!(ids.len(), 3);
+        let catalog = build_model_catalog(&ids, &[source.clone()]).unwrap();
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
+        assert_eq!(catalog["models"][0], source["models"][0]);
+        assert_eq!(catalog["models"][1]["visibility"], "hide");
+        assert!(parse_proxy_model_ids(&serde_json::json!({"data":[]})).is_err());
+        assert!(parse_proxy_model_ids(&serde_json::json!({"error":"unauthorized"})).is_err());
+    }
+
+    #[test]
+    fn catalog_round_trip_preserves_user_config_and_repeated_switches() {
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(
+            home.join(".codex/models_cache.json"),
+            r#"{"models":[{"slug":"new-model","context_window":42}]}"#,
+        )
+        .unwrap();
+        let mut doc = "model_catalog_json = '/custom/catalog.json'\nmodel = 'my-choice'\n"
+            .parse::<DocumentMut>()
+            .unwrap();
+        let ids = vec!["new-model".to_string()];
+        install_proxy_catalog(home, &mut doc, &ids).unwrap();
+        install_proxy_catalog(home, &mut doc, &ids).unwrap();
+        let saved = doc.to_string();
+        let bytes = fs::read(home.join(MODEL_CATALOG)).unwrap();
+        assert!(install_proxy_catalog(home, &mut doc, &["unknown".into()]).is_err());
+        assert_eq!(doc.to_string(), saved);
+        assert_eq!(fs::read(home.join(MODEL_CATALOG)).unwrap(), bytes);
+        restore_model_catalog(home, &mut doc).unwrap();
+        assert_eq!(
+            doc["model_catalog_json"].as_str(),
+            Some("/custom/catalog.json")
+        );
+        assert_eq!(doc["model"].as_str(), Some("my-choice"));
+        doc.as_table_mut().remove("model_catalog_json");
+        install_proxy_catalog(home, &mut doc, &ids).unwrap();
+        restore_model_catalog(home, &mut doc).unwrap();
+        assert!(doc.get("model_catalog_json").is_none());
+    }
 
     #[test]
     fn normalizes_proxy_url() {

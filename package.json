@@ -1,6 +1,6 @@
 {
   "name": "swidex",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "A small macOS desktop switcher for Codex ChatGPT and proxy modes.",
   "type": "module",
