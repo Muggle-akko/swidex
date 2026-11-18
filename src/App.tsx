@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { version as APP_VERSION } from "../package.json";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -93,7 +94,6 @@ type OperationLogEntry = {
 
 const STORAGE_KEY = "swidex.providers.v1";
 const LEGACY_STORAGE_KEY = "codex-switch.providers.v1";
-const APP_VERSION = "0.1.2";
 const OFFICIAL_URL = "https://chatgpt.com/codex";
 const unsetSnippet =
   "unset OPENAI_API_KEY CODEX_API_KEY OPENAI_BASE_URL OPENAI_API_BASE BASE_URL API_BASE_URL CODEX_ACCESS_TOKEN";

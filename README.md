@@ -8,7 +8,7 @@ Swidex 是一款专为 macOS 打造的 Codex 桌面工具。在 **ChatGPT 官方
 
 ![macOS](https://img.shields.io/badge/macOS-Desktop-111827?logo=apple&logoColor=white)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.1.2-1688F8)
+![Version](https://img.shields.io/badge/version-0.1.3-1688F8)
 
 </div>
 
